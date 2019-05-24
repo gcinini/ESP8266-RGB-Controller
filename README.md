@@ -1,5 +1,10 @@
-# ESP8266-RGB-Web-Server
+# ESP8266-RGB-Controller
 A Wi-Fi web server for the ESP8266 platform driving a WS2812B addressable RGB Led strip - Arduino sketch
+
+Developed on top of the original project: https://github.com/giznoise/Arduino-ESP8266-RGB-Web-Server
+Also derived inspiration from:
+https://github.com/Makerspaceteam04/Arduino-ESP8266-RGB-Web-Server
+https://github.com/kakopappa/arduino-esp8266-alexa-wemo-switch
 
 Description:
 An Arduino sketch for running a Wi-Fi web server on the ESP8266. I am using a Wemos D1 Mini. Designed to drive the WS2812B addressable RGB Led strips using the Adafruit Neopixel Arduino library.
