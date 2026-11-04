@@ -1,4 +1,4 @@
-/*	ESP8266WiFiWebServer v 3.0.1
+/*	ESP8266WiFiWebServer v 3.0.2
     ESP8266 RGB Web Server
 
 	Previous version c 2.1
