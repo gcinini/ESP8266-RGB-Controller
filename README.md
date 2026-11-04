@@ -107,3 +107,7 @@ This project is released under the [MIT License](LICENSE). The libraries compile
 - [PubSubClient](https://github.com/knolleary/pubsubclient)
 - [ESP8266 core for Arduino](https://github.com/esp8266/Arduino)
 - [Adafruit IO](https://io.adafruit.com/)
+
+## Acknowledgements
+
+Thanks to [giznoise](https://github.com/giznoise/Arduino-ESP8266-RGB-Web-Server), whose ESP8266 RGB lamp web server started this project, and to the forks by [Danorexic](https://github.com/Danorexic/Arduino-ESP8266-RGB-Web-Server) and [Makerspaceteam04](https://github.com/Makerspaceteam04/Arduino-ESP8266-RGB-Web-Server) that inspired the FastLED and MQTT versions.
