@@ -139,22 +139,55 @@ Once the lamp has been flashed over USB, later updates can go over Wi-Fi:
 pio run -e d1_mini_ota -t upload
 ```
 
-PlatformIO sends the firmware to `ESP-lightbox1.local`. If that name doesn't resolve on your PC, put the lamp's IP address in `upload_port` in `platformio.ini`. The first time, Windows may ask whether Python may use the network. Allow it on **private networks**, because the lamp connects back to your PC to fetch the firmware.
+Set `upload_port` in `platformio.ini` to the lamp's IP address (shown on its web page under **Network**), and give the lamp a fixed DHCP lease so the address doesn't change. A `.local` name only works when your PC and the lamp are on the same network: mDNS doesn't cross VLANs or subnets.
+
+An OTA upload uses two connections:
+
+| Direction | Protocol / port | Purpose |
+|---|---|---|
+| PC → lamp | UDP 8266 | PlatformIO invites the lamp to update |
+| lamp → PC | TCP 8270 | the lamp downloads the firmware from your PC (fixed with `--host_port=8270` in `platformio.ini`) |
+
+If the lamp is on a separate VLAN or behind a firewall, allow both, limited to the lamp's and PC's addresses, and allow TCP 8270 into the PC in Windows Firewall. On MikroTik, check the interfaces on the second rule: that traffic comes **in** on the lamp's VLAN and goes **out** to the PC's. For example:
+
+```powershell
+New-NetFirewallRule -DisplayName "ESP lamp OTA (PlatformIO)" -Direction Inbound -Protocol TCP -LocalPort 8270 -RemoteAddress <lamp IP> -Action Allow -Profile Private
+```
+
+A successful upload prints `Sending invitation`, `Waiting for device...`, then `Uploading: [====] 100%`. If it stops at `No response from device`, the UDP 8266 direction is blocked. If it stops after `Waiting for device...`, the TCP 8270 direction is blocked.
 
 **Optional password.** Without one, anyone on your network can flash the lamp. To require a password:
 
 1. In `secrets.h`, add `#define OTA_PASSWORD "your-password"`.
 2. Set the same password as a Windows environment variable: `setx LIGHTBOX_OTA_PASSWORD "your-password"`. Then restart VS Code.
-3. In `platformio.ini`, remove the `;` in front of `upload_flags`.
+3. In `platformio.ini`, remove the `;` in front of the `--auth=…` line under `upload_flags`.
 4. Upload once more over USB (or OTA without a password), because the running firmware only asks for the password after it has been updated.
+
+## Security notes
+
+- **Credentials stay out of git.** Wi-Fi and Adafruit IO details live only in `secrets.h`, which is git-ignored.
+- **Don't publish compiled firmware.** A `firmware.bin` built from your `secrets.h` contains those credentials in readable form, so releases contain source code only.
+- **Adafruit IO traffic is encrypted** (TLS on port 8883), and the server's certificate is checked.
+- **OTA has no password by default.** Set `OTA_PASSWORD` (see above) if other people or devices share the lamp's network.
+- **Older versions of this repository contained credentials in the code.** Those values were changed and then removed from the entire git history on 2026-11-04, so older tags now show `***REMOVED***` in their place.
 
 ## Versions
 
-Releases are tagged with [Semantic Versioning](https://semver.org/). See the **Releases** and **Tags** pages on GitHub. To check out an older version:
+Releases are tagged with [Semantic Versioning](https://semver.org/). See the **Releases** page on GitHub for the notes for each version. To check out an older version:
 
 ```bash
 git checkout v3.0.4
 ```
+
+| Version | Highlights |
+|---|---|
+| 3.3.0 | Encrypted Adafruit IO connection (TLS, port 8883) with root-certificate checking |
+| 3.2.0 | Candle mode; status report to Adafruit IO; every mode and palette controllable over MQTT; Network section on the web page; OTA across VLANs |
+| 3.1.0 | New web interface using the browser's own colour picker (no jscolor, no LittleFS upload); firmware rewritten; MIT license |
+| 3.0.4 | Modes rewritten so they no longer block: one-click mode changes, saved palettes, MQTT colour names and hex, non-blocking reconnect |
+| 3.0.2 | Sketch moved into its own folder for the Arduino IDE; PlatformIO support; credentials moved to `secrets.h` |
+| 3.0.0 – 3.0.1 | FastLED palettes, Adafruit IO (MQTT), OTA updates |
+| 2.1.0 | First FastLED web-server version |
 
 ## License
 
