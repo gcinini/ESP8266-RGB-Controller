@@ -16,3 +16,8 @@
 // Optional: password for over-the-air updates. If you set one, PlatformIO needs
 // it too - see the OTA section of README.md.
 // #define OTA_PASSWORD   "choose-an-ota-password"
+
+// Optional: set to 0 to use unencrypted MQTT on port 1883 instead of TLS on 8883.
+// Only do this if the encrypted connection can't work - the Adafruit IO key is
+// then sent in clear.
+// #define MQTT_USE_TLS   0

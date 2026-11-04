@@ -146,7 +146,8 @@ static const char WEB_PAGE[] PROGMEM = R"page(<!doctype html>
     const rows = [
       ['Address', s.host + '.local \u00b7 ' + s.ip],
       ['Wi-Fi', s.rssi + ' dBm (' + signalWord(s.rssi) + ')'],
-      ['Adafruit IO', s.mqtt ? 'Connected' : 'Not connected'],
+      ['Adafruit IO', (s.mqtt ? 'Connected' : 'Not connected') + (s.tls ? ', encrypted' : ', unencrypted')],
+      ['Free memory', Math.round(s.heap / 1024) + ' KB'],
       ['Firmware', 'v' + s.version + ', up ' + s.uptime]
     ];
     el('network').replaceChildren(...rows.flatMap(([k, v]) => {

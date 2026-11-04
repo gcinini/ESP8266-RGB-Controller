@@ -7,7 +7,7 @@ Wi-Fi firmware for a WS2812B LED lamp built on a Wemos D1 Mini (ESP8266). You co
 - **Web page** served by the lamp itself, works on phones and desktops: power, colour (using the browser's own colour picker), brightness, mode and palette.
 - **Modes:** solid colour, colour fade, rainbow, random (a different palette every few seconds), palette modes with smooth or stepped blending, and a flickering candle.
 - **Palettes:** Cloud, Ocean, Party, Heat, Forest, Lava.
-- **Adafruit IO control** over MQTT for every mode and palette, including colour names (`Hot Pink`) or hex values (`#FF8800`), plus a status report (mode, colour, Wi-Fi, IP address, uptime).
+- **Adafruit IO control** over encrypted MQTT (TLS, port 8883) for every mode and palette, including colour names (`Hot Pink`) or hex values (`#FF8800`), plus a status report (mode, colour, Wi-Fi, IP address, uptime).
 - **Remembers its settings.** Colour, brightness, mode and palette are restored after a power cut.
 - **Over-the-air (OTA) updates** over Wi-Fi, optionally password protected.
 - **Keeps working when the internet is down.** The lamp and web page stay usable and Adafruit IO reconnects in the background.
@@ -18,6 +18,7 @@ Wi-Fi firmware for a WS2812B LED lamp built on a Wemos D1 Mini (ESP8266). You co
 ESP8266-RGB-Web-Server/          the sketch (open this folder in the Arduino IDE)
 ├── ESP8266-RGB-Web-Server.ino   firmware
 ├── web_page.h                   the web interface (HTML/CSS/JS stored in flash)
+├── mqtt_roots.h                 root certificates trusted for the encrypted Adafruit IO connection
 ├── secrets.example.h            template for your credentials
 └── secrets.h                    your credentials (git-ignored, create it yourself)
 platformio.ini                   PlatformIO build settings (VS Code)
@@ -57,7 +58,7 @@ Open the repo folder in VS Code. PlatformIO downloads the board package and the 
 ### 2b. Arduino IDE
 
 1. In **File → Preferences → Additional boards manager URLs**, add `https://arduino.esp8266.com/stable/package_esp8266com_index.json`.
-2. In **Boards Manager**, install **esp8266** and select **LOLIN(WEMOS) D1 R2 & mini**.
+2. In **Boards Manager**, install **esp8266** and select **LOLIN(WEMOS) D1 R2 & mini**. Under **Tools → CPU Frequency**, choose **160 MHz** (PlatformIO does this automatically).
 3. In **Library Manager**, install **FastLED** and **PubSubClient** (by Nick O'Leary).
 4. Open `ESP8266-RGB-Web-Server/ESP8266-RGB-Web-Server.ino` and upload it.
 
@@ -78,6 +79,10 @@ After boot, the serial monitor shows the lamp's address, for example `http://192
 | `espweb.brightness` | `0`–`100` |
 | `espweb.outtopic` | **published by the lamp:** a status report (see below) |
 
+The lamp connects to `io.adafruit.com` on **port 8883 with TLS**, so your Adafruit IO key and messages are encrypted. It accepts the server only if its certificate is signed by one of the root certificates in `mqtt_roots.h`: DigiCert Global Root G2, which Adafruit IO uses today, or ISRG Root X1 (Let's Encrypt) as a fallback. Because certificate dates have to be checked, the lamp sets its clock from NTP before connecting.
+
+For this to work through a firewall, the lamp needs outbound **TCP 8883** to the internet and **UDP 123** (NTP). If the serial monitor shows `TLS error … certificate`, Adafruit IO has probably moved to a different certificate authority: add that authority's root certificate to `mqtt_roots.h`. As a last resort, `#define MQTT_USE_TLS 0` in `secrets.h` switches back to unencrypted port 1883.
+
 Commands are not case sensitive. Choosing a palette switches to a palette mode; `SOLID` goes back to the last colour.
 
 The lamp publishes a status report to `espweb.outtopic` when it connects, about 1.5 seconds after anything changes (at most once every 5 seconds), and every 10 minutes:
@@ -88,9 +93,10 @@ Mode: Palette, smooth
 Palette: Ocean
 Brightness: 40%
 Wi-Fi: gc-dev (-63 dBm)
-IP: 192.168.20.57
+IP: 192.168.30.30
 Host: ESP-lightbox1.local
-Firmware: v3.2.0, up 2h 05m
+Adafruit IO: encrypted (TLS)
+Firmware: v3.3.0, up 2h 05m
 ```
 
 If the lamp loses its connection, the report simply stops updating, so check the block's timestamp to see how fresh it is.

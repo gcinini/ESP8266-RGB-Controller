@@ -1,5 +1,5 @@
 /*
-  ESP8266 RGB Controller  v3.2.0
+  ESP8266 RGB Controller  v3.3.0
 
   Wi-Fi controller for a WS2812B LED lamp on a Wemos D1 Mini (ESP8266).
   Control it from the built-in web page or through Adafruit IO (MQTT).
@@ -17,15 +17,18 @@
 */
 
 #include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
 #include <ESP8266WebServer.h>
 #include <ArduinoOTA.h>
 #include <EEPROM.h>
 #include <PubSubClient.h>
+#include <time.h>
 
 #define FASTLED_ESP8266_RAW_PIN_ORDER   // must come before FastLED.h
 #include <FastLED.h>
 
 #include "web_page.h"
+#include "mqtt_roots.h"
 
 // Wi-Fi and Adafruit IO credentials live in secrets.h, which git ignores.
 #if __has_include("secrets.h")
@@ -43,7 +46,7 @@
 #define LED_TYPE   WS2812B
 #define LED_ORDER  GRB
 
-const char    *FIRMWARE_VERSION = "3.2.0-ota";
+const char    *FIRMWARE_VERSION = "3.3.0";
 const char    *DEVICE_NAME     = "ESP-lightbox1";   // network / OTA name
 const uint32_t FRAME_INTERVAL  = 20;            // ms per animation frame (50 fps)
 const uint32_t MQTT_RETRY_MS   = 5000;          // wait between MQTT reconnect attempts
@@ -61,8 +64,26 @@ const uint32_t STATUS_SETTLE_MS   = 1500;       // wait for changes to settle be
 const uint32_t STATUS_MIN_GAP_MS  = 5000;       // never report more often than this
 const uint32_t STATUS_HEARTBEAT_MS = 600000;    // report every 10 minutes even without changes
 
+// Adafruit IO connection. With MQTT_USE_TLS on (the default), the connection is
+// encrypted and the server's certificate is checked against the root
+// certificates in mqtt_roots.h. Add `#define MQTT_USE_TLS 0` to secrets.h to fall
+// back to the unencrypted port 1883 (your Adafruit IO key is then sent in clear).
+#ifndef MQTT_USE_TLS
+#define MQTT_USE_TLS 1
+#endif
+
 const char *MQTT_HOST = "io.adafruit.com";
+#if MQTT_USE_TLS
+const uint16_t MQTT_PORT = 8883;
+#else
 const uint16_t MQTT_PORT = 1883;
+#endif
+
+// Certificates can only be checked with the correct date, so the lamp sets its
+// clock from these NTP servers before connecting.
+const char *NTP_SERVER_1 = "pool.ntp.org";
+const char *NTP_SERVER_2 = "time.google.com";
+const time_t CLOCK_VALID_AFTER = 1704067200;   // 2024-01-01: anything earlier means "not set yet"
 
 
 // ===========================================================================
@@ -131,7 +152,12 @@ CRGB          solidColour;            // lamp.colour after gamma correction
 uint8_t       animationPhase = 0;
 
 ESP8266WebServer web(80);
-WiFiClient       mqttSocket;
+#if MQTT_USE_TLS
+BearSSL::WiFiClientSecure mqttSocket;
+BearSSL::X509List         mqttTrustedRoots(MQTT_ROOT_CERTS);
+#else
+WiFiClient                mqttSocket;
+#endif
 PubSubClient     mqtt(mqttSocket);
 
 // Adafruit IO feed topics, built from MQTT_USER in setup()
@@ -175,6 +201,8 @@ void saveSettingsIfDue();
 // Networking
 void connectWiFi();
 void startOta();
+bool clockIsSet();
+void prepareMqttSocket();
 void serviceMqtt();
 void onMqttMessage(char *topic, byte *payload, unsigned int length);
 
@@ -198,6 +226,7 @@ void setup() {
 
   loadSettings();         // restore the last state so the lamp lights up immediately
   connectWiFi();          // keeps animating while it waits
+  configTime(0, 0, NTP_SERVER_1, NTP_SERVER_2);   // UTC; the clock is only used for certificate checks
   startOta();
   startWebServer();
 
@@ -541,8 +570,32 @@ void startOta() {
   ArduinoOTA.begin();
 }
 
-// Keeps the Adafruit IO connection alive. When it is down, one reconnect attempt
-// is made every MQTT_RETRY_MS; the lamp and web page keep working in between.
+bool clockIsSet() {
+  return time(nullptr) > CLOCK_VALID_AFTER;
+}
+
+// Sets up the encrypted connection once: which certificates to trust, and the
+// smallest TLS buffers the server allows (saves RAM on the ESP8266).
+void prepareMqttSocket() {
+#if MQTT_USE_TLS
+  static bool prepared = false;
+  if (prepared) return;
+  prepared = true;
+
+  mqttSocket.setTrustAnchors(&mqttTrustedRoots);
+  if (BearSSL::WiFiClientSecure::probeMaxFragmentLength(MQTT_HOST, MQTT_PORT, 1024)) {
+    mqttSocket.setBufferSizes(1024, 1024);
+    Serial.println("Adafruit IO: server supports small TLS buffers (1 KB)");
+  } else {
+    Serial.println("Adafruit IO: using standard TLS buffers (16 KB)");
+  }
+#endif
+}
+
+// Keeps the Adafruit IO connection alive. When it is down, reconnect attempts
+// start every MQTT_RETRY_MS and back off to once a minute if they keep failing
+// (an encrypted attempt pauses the lamp for a second or two). The lamp and the
+// web page keep working in between.
 void serviceMqtt() {
   if (mqtt.connected()) {
     mqtt.loop();
@@ -550,25 +603,51 @@ void serviceMqtt() {
   }
 
   static uint32_t lastAttemptAt = 0;
-  static bool attemptedBefore = false;
-  if (attemptedBefore && millis() - lastAttemptAt < MQTT_RETRY_MS) return;
-  attemptedBefore = true;
-  lastAttemptAt = millis();
+  static uint32_t retryDelay = 0;          // 0 = try straight away
+  if (millis() - lastAttemptAt < retryDelay) return;
   if (WiFi.status() != WL_CONNECTED) return;
 
+#if MQTT_USE_TLS
+  static bool waitingForClock = false;
+  if (!clockIsSet()) {                     // certificate dates can't be checked yet
+    if (!waitingForClock) Serial.println("Adafruit IO: waiting for the clock to be set by NTP");
+    waitingForClock = true;
+    return;
+  }
+  if (waitingForClock) Serial.println("Adafruit IO: clock set");
+  waitingForClock = false;
+  prepareMqttSocket();
+  mqttSocket.setX509Time(time(nullptr));
+#endif
+
+  lastAttemptAt = millis();
   String clientId = String(DEVICE_NAME) + "-" + String(ESP.getChipId(), HEX);
-  Serial.print("Adafruit IO: connecting... ");
+  Serial.printf("Adafruit IO: connecting to %s:%u%s... ", MQTT_HOST, MQTT_PORT, MQTT_USE_TLS ? " (TLS)" : "");
   if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_KEY)) {
-    Serial.println("connected");
+    Serial.printf("connected (free memory %u bytes)\n", ESP.getFreeHeap());
     mqtt.subscribe(topicPower.c_str());
     mqtt.subscribe(topicColour.c_str());
     mqtt.subscribe(topicBrightness.c_str());
     mqtt.subscribe(topicButton.c_str());
     statusPending = true;   // report the current state straight away
     lastStatusAt = 0;
-  } else {
-    Serial.printf("failed (state %d), retrying in %lu s\n", mqtt.state(), (unsigned long)(MQTT_RETRY_MS / 1000));
+    retryDelay = MQTT_RETRY_MS;
+    return;
   }
+
+  Serial.printf("failed (state %d)\n", mqtt.state());
+#if MQTT_USE_TLS
+  char reason[80];
+  int sslError = mqttSocket.getLastSSLError(reason, sizeof(reason));
+  if (sslError != 0) {
+    Serial.printf("  TLS error %d: %s\n", sslError, reason);
+    Serial.println("  (a certificate error usually means Adafruit IO changed certificate authority - see mqtt_roots.h)");
+  }
+#endif
+  if (retryDelay == 0)          retryDelay = MQTT_RETRY_MS;
+  else if (retryDelay < 30000)  retryDelay *= 2;
+  else                          retryDelay = 60000;
+  Serial.printf("  retrying in %lu s\n", (unsigned long)(retryDelay / 1000));
 }
 
 // Feeds:
@@ -632,6 +711,7 @@ String statusText() {
   s += "\nWi-Fi: ";     s += WiFi.SSID(); s += " ("; s += WiFi.RSSI(); s += " dBm)";
   s += "\nIP: ";        s += WiFi.localIP().toString();
   s += "\nHost: ";      s += DEVICE_NAME; s += ".local";
+  s += "\nAdafruit IO: "; s += MQTT_USE_TLS ? "encrypted (TLS)" : "unencrypted";
   s += "\nFirmware: v"; s += FIRMWARE_VERSION; s += ", up "; s += uptimeText();
   return s;
 }
@@ -748,6 +828,8 @@ String stateAsJson() {
   json += "\",\"ip\":\"";     json += WiFi.localIP().toString();
   json += "\",\"rssi\":";     json += WiFi.RSSI();
   json += ",\"mqtt\":";       json += mqtt.connected() ? "true" : "false";
+  json += ",\"tls\":";        json += MQTT_USE_TLS ? "true" : "false";
+  json += ",\"heap\":";       json += ESP.getFreeHeap();
   json += ",\"version\":\"";  json += FIRMWARE_VERSION;
   json += "\",\"uptime\":\""; json += uptimeText();
   json += "\"}";
