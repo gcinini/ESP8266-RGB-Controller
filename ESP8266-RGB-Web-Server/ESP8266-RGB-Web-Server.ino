@@ -228,8 +228,8 @@ void loop ( void ) {
     reconnectMQTT();
   }
   client.loop(); // PubsubClient client process incoming messages and maintains MQTT connection to server
-	Serial.print ( "Mode: ");
-  Serial.println (mode_flag);
+	//Serial.print ( "Mode: ");
+  //Serial.println (mode_flag);
 	//MDNS.update();
 	
 	ArduinoOTA.handle(); // Services OverTheAir Update requests
@@ -423,7 +423,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
       }
     }
   Serial.println (value);
-  for (int i=0;i<length;i++) {
+  for (unsigned int i=0;i<length;i++) {
     Serial.print((char)payload[i]);
     }
   Serial.println();
@@ -491,7 +491,7 @@ bool handleFileRead(String path) {
   String contentType = getContentType(path);		// Get the MIME type
   if (LittleFS.exists(path)) {                        // If the file exists
     File file = LittleFS.open(path, "r");             // Open it
-    size_t sent = server.streamFile(file, contentType); // And send it to the client
+    server.streamFile(file, contentType); // And send it to the client
     file.close();                                   // Then close the file again
     return true;
   }
