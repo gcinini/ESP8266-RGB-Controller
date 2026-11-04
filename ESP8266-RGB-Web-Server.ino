@@ -1,8 +1,10 @@
-/*	ESP8266WiFiWebServer v 2.1
-	Copyright (c) 2015, Majenko Technologies
-	All rights reserved.
-	https://github.com/Makerspaceteam04/Arduino-ESP8266-RGB-Web-Server
-	Original project found here https://github.com/giznoise/Arduino-ESP8266-RGB-Web-Server
+/*	ESP8266WiFiWebServer v 3.0
+
+	Previous version c 2.1
+		Copyright (c) 2015, Majenko Technologies
+		All rights reserved.
+		https://github.com/Makerspaceteam04/Arduino-ESP8266-RGB-Web-Server
+		Original project found here https://github.com/giznoise/Arduino-ESP8266-RGB-Web-Server
 */
 
 //Public Release Version
@@ -13,22 +15,31 @@
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
 #include <EEPROM.h>
+#include <ArduinoOTA.h>
 #include <PubSubClient.h>
 
-#define FASTLED_ESP8266_RAW_PIN_ORDER //Refer to FastLED notes on ESP8266 for an explanation on these modes
+#define HOSTNAME lightbox1
+// #define FASTLED_ESP8266_RAW_PIN_ORDER //Refer to FastLED notes on ESP8266 for an explanation on these modes
 //This define must be called before including FastLED
 #include <FastLED.h>
-#include <ArduinoOTA.h> // 
+
 #include "html_pages.h"
-#include <FS.h>
+#include <LittleFS.h>
 
 //FastLED setup
-#define LED_PIN     D4 // Using WeMos D4 pin for the control line
-#define NUM_LEDS    35 // Make sure you change this to the number of LEDs in the strip
-#define LED_TYPE    WS2812B
-#define COLOR_ORDER GRB
+#define DATA_PIN  D4 // Using WeMos D4 pin for the control line
+#define NUM_LEDS  30 // Make sure you change this to the number of LEDs in the strip
+#define LED_TYPE  WS2812B
+#define COLOR_ORDER GRB // LED order for WS2812B
 #define UPDATES_PER_SECOND 50
 static uint8_t startIndex = 0;
+CRGB leds[NUM_LEDS]; // Define the array of leds
+CRGBPalette16 currentPalette;
+TBlendType    currentBlending;
+
+extern CRGBPalette16 myRedWhiteBluePalette;
+extern const TProgmemPalette16 myRedWhiteBluePalette_p PROGMEM;
+
 //End FastLED defines
 
 //MQTT Connection Setup
@@ -36,7 +47,7 @@ static uint8_t startIndex = 0;
 #define mqtt_user "gcinini"
 #define mqtt_password "***REMOVED***"
 WiFiClient espClient;			// Declares a WiFiClient Object using ESP8266WiFi
-PubSubClient client(espClient); // instanciates client
+PubSubClient client(espClient); // instanciates Pubsub MQTT client
 #define control_topic "gcinini/feeds/espweb.onoff"
 #define color_topic "gcinini/feeds/espweb.color"
 #define brightness_topic "gcinini/feeds/espweb.brightness"
@@ -44,21 +55,12 @@ PubSubClient client(espClient); // instanciates client
 #define button_topic "gcinini/feeds/espweb.button"
 
 //Wifi settings
-const char *ssid = "gchome";
+const char *ssid = "gc-dev";
 const char *password = "***REMOVED***";
 
 //MDNSResponder mdns;
 
 ESP8266WebServer server ( 80 );
-
-//FastLED stuff
-CRGBPalette16 currentPalette;
-TBlendType    currentBlending;
-
-extern CRGBPalette16 myRedWhiteBluePalette;
-extern const TProgmemPalette16 myRedWhiteBluePalette_p PROGMEM;
-
-CRGB leds[NUM_LEDS];
 
 const int delayval = 500;
 String rgb_now = "#0000ff";    //global rgb state values for use in various html pages
@@ -66,10 +68,15 @@ long red_int = 0;
 long green_int = 0;
 long blue_int = 255;
 int brightness = 255;
-int mode_flag = 1;
+int mode_flag = 1; // Initial mode set to 1
+
+uint32_t Wheel(byte);
+
+String getContentType(String filename); // convert the file extension to the MIME type
+bool handleFileRead(String path);       // send the right file to the client (if it exists)
 
 // Functions dummy defs
-void all_white_full();
+void allWhiteFullBright();
 void handleIndex();
 void handleNotFound();
 void handleSwitchOn();
@@ -92,21 +99,16 @@ void handle_cloud();
 void handle_party();
 void handle_heat();
 void handle_ocean();
-
-uint32_t Wheel(byte);
-
-String getContentType(String filename); // convert the file extension to the MIME type
-bool handleFileRead(String path);       // send the right file to the client (if it exists)
 void setupWiFi();
 void setupMDNS ();
 void reconnectMQTT();
 void callback(char* topic, byte* payload, unsigned int length);
 void setupOTA ();
-void FillLEDsFromPaletteColors( uint8_t colorIndex);
+void fillLEDsFromPaletteColors( uint8_t colorIndex);
 void ChangePalettePeriodically();
 void SetupTotallyRandomPalette(); // This function fills the palette with totally random colors.
 void SetupBlackAndWhiteStripedPalette(); // This function sets up a palette of black and white stripes
-void SetupPurpleAndGreenPalette(); // This function sets up a palette of purple and green stripes.
+void setupPurpleAndGreenPalette(); // This function sets up a palette of purple and green stripes.
 void handleColour(); 
 void handleBrightness();
 void light_up_all();
@@ -139,80 +141,83 @@ const TProgmemPalette16 myRedWhiteBluePalette_p PROGMEM =
 };
 
 // SETUP
-void setup ( void ) {
-	Serial.begin ( 115200 );
-	//WiFi.setSleepMode(WIFI_NONE_SLEEP);
-	FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection( TypicalLEDStrip );
-	FastLED.setDither(1); //Allows for low brightness not to flicker
-	//FastLED.setMaxPowerInVoltsAndMilliamps(5, 900);
-	setupWiFi(); 	// call setupWiFi function
-	// setupMDNS (); // call setupMDNS function
-	// setupOTA ();  // setup ArduinoOTA
-	Serial.println ( "" );
-	EEPROM.begin(5); // set up EEPROM storage space for config values
- 
-	//MQTT Setup
-	client.setServer(mqtt_server, 1883);
-	client.subscribe(control_topic);
-	client.subscribe(color_topic);
-	client.subscribe(brightness_topic);
-	Serial.println("Subsribed to topics");
-	client.setCallback(callback);
-	Serial.println("Callback set");
-	Serial.println("");
- 
-	//Webpage handling setup
-	server.on ( "/", handleIndex );
-	server.onNotFound ( handleNotFound );
-	server.on ( "/switch_on", handleSwitchOn);
-	server.on ( "/switch_off", handleSwitchOff);
-	server.on ( "/set_colour", handleSetColour);
-	server.on ( "/set_colour_hash", handleColour );
-	server.on ( "/set_brightness", handleSetBrightness);
-	server.on ( "/set_bright_val", handleBrightness);
-	server.on ( "/select_mode", handleSelectMode);
-	server.on ( "/select_palette", handleSelectPalette);
-	server.on ( "/set_mode1", handle_mode1);
-	server.on ( "/set_mode2", handle_mode2);
-	server.on ( "/set_mode3", handle_mode3);
-	server.on ( "/set_mode4", handle_mode4);
-	server.on ( "/set_mode5", handle_mode5);
-	server.on ( "/set_mode6", handle_mode6);
-	server.on ( "/set_cloud", handle_cloud);
-	server.on ( "/set_party", handle_party);
-	server.on ( "/set_heat",  handle_heat);
-	server.on ( "/set_ocean", handle_ocean);
+void setup (void) {
+  Serial.begin (115200);
   
-	//EEPROM Memory//
-	//Mem Location ||--0--||--1--||--2--||--3--||--4--||--5--||--6--||
-	//                red   green  blue   bright  mode
-	//restore colour to last used value. Ensures RGB lamp is same colour as when last switched off
-	red_int = EEPROM.read(0);       
-	green_int = EEPROM.read(1);
-	blue_int = EEPROM.read(2);
-	brightness = EEPROM.read(3);
-	mode_flag = EEPROM.read(4);
- 
-	SPIFFS.begin();
-	server.begin(); // Instantiate HTTP server handler
-	Serial.println ( "HTTP server started" );
-	Serial.println ( "");
-	handleSwitchOn();
-	}
+  //WiFi.setSleepMode(WIFI_NONE_SLEEP);
+  
+  FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection( TypicalLEDStrip );
+  FastLED.setDither(1); //Allows for low brightness not to flicker
+  //FastLED.setMaxPowerInVoltsAndMilliamps(5, 900);
 
-// LOOP!!
+  setupWiFi(); 	// call setupWiFi function
+
+  // setupMDNS (); // call setupMDNS function
+
+  setupOTA ();  // setup Arduino Over the air updating
+
+  EEPROM.begin(5); // set up EEPROM storage space for config values
+  
+  // MQTT Setup
+  client.setServer(mqtt_server, 1883);
+  client.subscribe(control_topic);
+  client.subscribe(color_topic);
+  client.subscribe(brightness_topic);
+  client.setCallback(callback);
+  
+  // Webpage handling setup
+  server.on ( "/", handleIndex );
+  server.onNotFound ( handleNotFound );
+  server.on ( "/switch_on", handleSwitchOn);
+  server.on ( "/switch_off", handleSwitchOff);
+  server.on ( "/set_colour", handleSetColour);
+  server.on ( "/set_colour_hash", handleColour );
+  server.on ( "/set_brightness", handleSetBrightness);
+  server.on ( "/set_bright_val", handleBrightness);
+  server.on ( "/select_mode", handleSelectMode);
+  server.on ( "/select_palette", handleSelectPalette);
+  server.on ( "/set_mode1", handle_mode1);
+  server.on ( "/set_mode2", handle_mode2);
+  server.on ( "/set_mode3", handle_mode3);
+  server.on ( "/set_mode4", handle_mode4);
+  server.on ( "/set_mode5", handle_mode5);
+  server.on ( "/set_mode6", handle_mode6);
+  server.on ( "/set_cloud", handle_cloud);
+  server.on ( "/set_party", handle_party);
+  server.on ( "/set_heat",  handle_heat);
+  server.on ( "/set_ocean", handle_ocean);
+  
+  //EEPROM Memory//
+  //Mem Location ||--0--||--1--||--2--||--3--||--4--||--5--||--6--||
+  //                red   green  blue   bright  mode
+  //restore colour to last used value. Ensures RGB lamp is same colour as when last switched off
+  red_int = EEPROM.read(0);       
+  green_int = EEPROM.read(1);
+  blue_int = EEPROM.read(2);
+  brightness = EEPROM.read(3);
+  mode_flag = EEPROM.read(4);
+  
+  LittleFS.begin();
+  server.begin(); // Instantiate HTTP server handler
+  Serial.println ( "HTTP server started" );
+  Serial.println ("");
+  handleSwitchOn();
+}
+
+
+
 void loop ( void ) {
-	//MQTT Handling - first check if MQTT connection is up and calls reconnect if not
-    if (!client.connected()) {
-		reconnectMQTT();
-		}
-    client.loop(); // PubsubClient client process incoming messages and maintains MQTT connection to server
-    //End MQTT handling
+  //MQTT Handling - first check if MQTT connection is up and calls reconnect if not
+  if (!client.connected()) {
+    reconnectMQTT();
+  }
+  client.loop(); // PubsubClient client process incoming messages and maintains MQTT connection to server
+
+	//MDNS.update();
 	
-	MDNS.update();
-	//ArduinoOTA.handle(); // Get OverTheAir update handler up
+	ArduinoOTA.handle(); // Services OverTheAir Update requests
     
-    server.handleClient();	// ESPP8266WebServer handles Web server input 
+  server.handleClient();	// ESPP8266WebServer handles Web server input 
   
 	// FastLED.setBrightness(brightness);
 	//currentPalette = RainbowColors_p;
@@ -221,71 +226,70 @@ void loop ( void ) {
 	//ChangePalettePeriodically();
 	//uint8_t startIndex = 0;
 	//startIndex = startIndex + 1; /* motion speed */
-	//FillLEDsFromPaletteColors( startIndex);
+	//fillLEDsFromPaletteColors( startIndex);
 	//FastLED.show();
 	//FastLED.delay(1000 / UPDATES_PER_SECOND);
 
-  if (mode_flag == 1) {
-    FastLED.show();
-    FastLED.delay(1000 / UPDATES_PER_SECOND);
-  }
+	if (mode_flag == 1) {
+		light_up_all(); //set mode to default state - all led's on, fixed colour. This loop will service any brightness changes
+		FastLED.delay(1000 / UPDATES_PER_SECOND);
+	}
 
-  if (mode_flag == 2 || mode_flag == 3) {
-    startIndex = 0;
-    startIndex = startIndex + 1; /* motion speed */
+	if (mode_flag == 2 || mode_flag == 3) {
+		startIndex = 0;
+		startIndex = startIndex + 1; /* motion speed */
 
-    FillLEDsFromPaletteColors( startIndex);
+		fillLEDsFromPaletteColors( startIndex);
 
-    FastLED.show();
-    FastLED.delay(1000 / UPDATES_PER_SECOND);
-  }
+		FastLED.show();
+		FastLED.delay(1000 / UPDATES_PER_SECOND);
+	}
 
-  if (mode_flag == 4) {
-    ChangePalettePeriodically();
-    static uint8_t startIndex = 0;
-    startIndex = startIndex + 1; /* motion speed */
+	if (mode_flag == 4) {
+		ChangePalettePeriodically();
+		static uint8_t startIndex = 0;
+		startIndex = startIndex + 1; /* motion speed */
 
-    FillLEDsFromPaletteColors( startIndex);
+		fillLEDsFromPaletteColors( startIndex);
 
-    FastLED.show();
-    FastLED.delay(1000 / UPDATES_PER_SECOND);
-  }
+		FastLED.show();
+		FastLED.delay(1000 / UPDATES_PER_SECOND);
+	}
 
-  if (mode_flag == 5 || mode_flag == 6) {
-    static uint8_t startIndex = 0;
-    startIndex = startIndex + 1; /* motion speed */
+	if (mode_flag == 5 || mode_flag == 6) {
+		static uint8_t startIndex = 0;
+		startIndex = startIndex + 1; /* motion speed */
 
-    FillLEDsFromPaletteColors( startIndex);
+		fillLEDsFromPaletteColors( startIndex);
 
-    FastLED.show();
-    FastLED.delay(1000 / UPDATES_PER_SECOND);
-  }
+		FastLED.show();
+		FastLED.delay(1000 / UPDATES_PER_SECOND);
+	}
 }
 
 
-void setupWiFi()
-{
-  WiFi.mode(WIFI_STA);
-  WiFi.begin ( ssid, password );
-  Serial.print ( "trying connection to WiFi " );
-  // Wait for connection
-  while ( WiFi.status() != WL_CONNECTED )
-  {
-    delay ( 500 );
-    Serial.print ( "." );
-  }
-  Serial.print(" Success! Connected to SSID ");
-  Serial.println(ssid);
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
-  Serial.println("");
+void setupWiFi() {
+	WiFi.mode(WIFI_STA);
+	WiFi.begin ( ssid, password );
+	Serial.print ( "Connecting to WiFi " );
+  Serial.print ( ssid );
+	// Wait for connection
+	while ( WiFi.status() != WL_CONNECTED ) {
+		delay ( 500 );
+		Serial.print ( "." );
+	}
+	Serial.print(" Success! Connected to SSID ");
+	Serial.println(ssid);
+	Serial.print("IP address: ");
+	Serial.println(WiFi.localIP());
+	Serial.println("");
 }
 
 
 //Setting up mDNS service
 void setupMDNS () {
   delay(1000);
-  if (!MDNS.begin("lightbox")) {
+  if (!MDNS.begin("lightbox1")) {
     Serial.println("Error setting up MDNS responder!");
     while (1) {
       delay(1000);
@@ -295,34 +299,47 @@ void setupMDNS () {
   }
 
   void reconnectMQTT() {
-  while (!client.connected()) // Loop until we're reconnected
-  {
-    Serial.println("Attempting MQTT connection... ");
-    // Create a random client ID
-    String clientId = "ESP8266Client-";
-    clientId += String(random(0xffff), HEX);
-    Serial.println("MQTT Client ID: "+ clientId);
-    // Attempt to connect
-    if (client.connect(clientId.c_str(), mqtt_user, mqtt_password))
-    {
-      Serial.println("connected");
-      client.subscribe(control_topic);
-      client.subscribe(color_topic);
-      client.subscribe(brightness_topic);
-      client.subscribe(button_topic);
-      client.publish("gcinini/feeds/espweb.outtopic", "hello world");
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      delay(5000);
-    }
-  }
+	while (!client.connected()) // Loop until we're reconnected
+	{
+		Serial.println("Attempting MQTT connection... ");
+		// Create a random client ID
+		String clientId = "ESP8266Client-";
+		clientId += String(random(0xffff), HEX);
+		Serial.println("MQTT Client ID: "+ clientId);
+		// Attempt to connect
+		if (client.connect(clientId.c_str(), mqtt_user, mqtt_password)) {
+			Serial.println("connected");
+			client.subscribe(control_topic);
+			client.subscribe(color_topic);
+			client.subscribe(brightness_topic);
+			client.subscribe(button_topic);
+			client.publish("gcinini/feeds/espweb.outtopic", "hello world");
+		} else {
+			Serial.print("failed, rc=");
+			Serial.print(client.state());
+			Serial.println(" try again in 5 seconds");
+			delay(5000);
+		}
+	}
 }
+
+// Checks if new mode is already in EEPROM, if not updates EEPROM with received parameter
+void eepromModeCheckAndUpdate(int mode) {
+  mode_flag = EEPROM.read(4);
+  if (mode == mode_flag) {
+    return;
+  }
+  EEPROM.write(4, mode);
+  EEPROM.commit();
+  Serial.println("EEPROM mode updated");
+  Serial.print("Mode ");
+  Serial.println(mode);
+}
+ 
 
 //MQTT Callback function
 void callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("Message arrived [");
+  Serial.print("MQTT message arrived [");
   Serial.print(topic);
   Serial.println("] ");
   Serial.print("payload: ");
@@ -350,7 +367,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
   }
   if (value.equalsIgnoreCase(WHITE)) {
     Serial.print("White Received!");
-    all_white_full();
+    allWhiteFullBright();
   }
   if (strcmp(topic,brightness_topic)==0) {
     int brightness_holder = value.toInt();
@@ -396,33 +413,36 @@ void callback(char* topic, byte* payload, unsigned int length) {
   Serial.println();
 }
 
-// Over the Air updating support setup
+// Over the Air Update support setup and startup
 void setupOTA () {
-  ArduinoOTA.setHostname("Lightbox-ESP8266");
-  ArduinoOTA.onStart([]() {
-    Serial.println("OTA Start");
-    });
-  ArduinoOTA.onEnd([]() {
-    Serial.println("\nEnd");
-    });
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
-    });
-  ArduinoOTA.onError([](ota_error_t error) {
-    Serial.printf("Error[%u]: ", error);
-    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-    else if (error == OTA_END_ERROR) Serial.println("End Failed");
-    });
-  ArduinoOTA.begin();
+	ArduinoOTA.setHostname("lightbox1");
+	ArduinoOTA.onStart([]() {
+		Serial.println("Over the air update - OTA - Started");
+		});
+	ArduinoOTA.onEnd([]() {
+		Serial.println("\nOTA Update Finished");
+		});
+	ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+		Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+		});
+	ArduinoOTA.onError([](ota_error_t error) {
+		Serial.printf("Error[%u]: ", error);
+		if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+		else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+		else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+		else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+		else if (error == OTA_END_ERROR) Serial.println("End Failed");
+		});
+	ArduinoOTA.begin();
 }
 
+
+// Function that handles an HTTP get for the index page
 void handleIndex() {
   Serial.println ( "Request for index page received" );
   server.send ( 200, "text/html", page_contents);
 }
+
 
 void handleNotFound() {
   if (!handleFileRead(server.uri())) {
@@ -447,19 +467,22 @@ String getContentType(String filename) { // convert the file extension to the MI
   return "text/plain";
 }
 
-bool handleFileRead(String path) { // send the right file to the client (if it exists)
+
+// send the right file to the client (if it exists)
+bool handleFileRead(String path) { 
   Serial.println("handleFileRead: " + path);
-  //if (path.endsWith("/")) path += "index.html";         // If a folder is requested, send the index file
-  String contentType = getContentType(path);            // Get the MIME type
-  if (SPIFFS.exists(path)) {                            // If the file exists
-    File file = SPIFFS.open(path, "r");                 // Open it
+  //if (path.endsWith("/")) path += "index.html";	// If a folder is requested, send the index file
+  String contentType = getContentType(path);		// Get the MIME type
+  if (LittleFS.exists(path)) {                        // If the file exists
+    File file = LittleFS.open(path, "r");             // Open it
     size_t sent = server.streamFile(file, contentType); // And send it to the client
-    file.close();                                       // Then close the file again
+    file.close();                                   // Then close the file again
     return true;
   }
   Serial.println("\tFile Not Found");
-  return false;                                         // If the file doesn't exist, return false
+  return false; // If the file doesn't exist, return false
 }
+
 
 void handleSwitchOn() {
   mode_flag = EEPROM.read(4); // start-up in last saved mode
@@ -479,14 +502,14 @@ void handleSwitchOn() {
     break;
     case 7: handle_cloud();
     default:
-    light_up_all(); //Default to fixed colour should the EEProm become corrupted
+    light_up_all(); //Default to fixed colour should the EEProm becomes corrupted
     break;
   }
   server.send ( 200, "text/html", "<SCRIPT language='JavaScript'>window.location='/';</SCRIPT>" );
 }
 
 void handleSwitchOff() {
-  mode_flag = 1;           //go to default fixed color mode and turn off all pixels
+  mode_flag = 1; //go to default fixed color mode and turn off all pixels
   delay(100);
   turn_off_all();
   server.send ( 200, "text/html", "<SCRIPT language='JavaScript'>window.location='/';</SCRIPT>" );
@@ -511,7 +534,8 @@ void handleSelectPalette() {
 }
 
 
-void FillLEDsFromPaletteColors( uint8_t colorIndex) {
+// 
+void fillLEDsFromPaletteColors( uint8_t colorIndex) {
   //uint8_t brightness = 255;
   for ( int i = 0; i < NUM_LEDS; i++) {
     leds[i] = ColorFromPalette( currentPalette, colorIndex, brightness, currentBlending);
@@ -527,72 +551,49 @@ void ChangePalettePeriodically() {
     if ( secondHand ==  0)  {
       currentPalette = RainbowColors_p;
       currentBlending = LINEARBLEND;
-      Serial.println("Second hand: ");
-      Serial.println(secondHand);
     }
     if ( secondHand == 10) {
       currentPalette = RainbowStripeColors_p;
       currentBlending = NOBLEND;
-      Serial.println("Second hand: ");
-      Serial.println(secondHand);
     }
     if ( secondHand == 15) {
       currentPalette = RainbowStripeColors_p;
       currentBlending = LINEARBLEND;
-      Serial.println("Second hand: ");
-      Serial.println(secondHand);
     }
     if ( secondHand == 20) {
-      SetupPurpleAndGreenPalette();
+      setupPurpleAndGreenPalette();
       currentBlending = LINEARBLEND;
-      Serial.println("Second hand: ");
-      Serial.println(secondHand);
     }
     if ( secondHand == 25) {
       SetupTotallyRandomPalette();
       currentBlending = LINEARBLEND;
-      Serial.println("Second hand: ");
-      Serial.println(secondHand);
     }
     if ( secondHand == 30) {
       SetupBlackAndWhiteStripedPalette();
       currentBlending = NOBLEND;
-      Serial.println("Second hand: ");
-      Serial.println(secondHand);
     }
     if ( secondHand == 35) {
       SetupBlackAndWhiteStripedPalette();
       currentBlending = LINEARBLEND;
-      Serial.println("Second hand: ");
-      Serial.println(secondHand);
     }
     if ( secondHand == 40) {
       currentPalette = CloudColors_p;
       currentBlending = LINEARBLEND;
-      Serial.println("Second hand: ");
-      Serial.println(secondHand);
     }
     if ( secondHand == 45) {
       currentPalette = PartyColors_p;
       currentBlending = LINEARBLEND;
-      Serial.println("Second hand: ");
-      Serial.println(secondHand);
     }
     if ( secondHand == 50) {
       currentPalette = myRedWhiteBluePalette_p;
       currentBlending = NOBLEND;
-      Serial.println("Second hand: ");
-      Serial.println(secondHand);
     }
     if ( secondHand == 55) {
       currentPalette = myRedWhiteBluePalette_p;
       currentBlending = LINEARBLEND;
-      Serial.println("Second hand: ");
-      Serial.println(secondHand);
     }
   }
 }
-
 
 
 // This function fills the palette with totally random colors.
@@ -602,11 +603,12 @@ void SetupTotallyRandomPalette() {
   }
 }
 
+
+// This function sets up a palette of black and white stripes,
+// using code.  Since the palette is effectively an array of
+// sixteen CRGB colors, the various fill_* functions can be used
+// to set them up. */
 void SetupBlackAndWhiteStripedPalette() {
-  /*  This function sets up a palette of black and white stripes,
-  using code.  Since the palette is effectively an array of
-  sixteen CRGB colors, the various fill_* functions can be used
-  to set them up. */
   fill_solid( currentPalette, 16, CRGB::Black); // 'black out' all 16 palette entries...
   // and set every fourth one to white.
   currentPalette[0] = CRGB::White;
@@ -614,9 +616,9 @@ void SetupBlackAndWhiteStripedPalette() {
   currentPalette[8] = CRGB::White;
   currentPalette[12] = CRGB::White;
   }
-
-  void SetupPurpleAndGreenPalette() {
-  // This function sets up a palette of purple and green stripes.
+  
+// This function sets up a palette of purple and green stripes.
+void setupPurpleAndGreenPalette() {
   CRGB purple = CHSV( HUE_PURPLE, 255, 255);
   CRGB green  = CHSV( HUE_GREEN, 255, 255);
   CRGB black  = CRGB::Black;
@@ -626,6 +628,7 @@ void SetupBlackAndWhiteStripedPalette() {
                      green,  green,  black,  black,
                      purple, purple, black,  black );
   }
+
 
 void handleColour() {
   char buf_red[3];  //char buffers to hold 'String' value converted to char array
@@ -657,7 +660,7 @@ void handleColour() {
   EEPROM.write(1, green_int);
   EEPROM.write(2, blue_int);
   //trying to fix on and off
-  EEPROM.write(4, mode_flag);   //write mode to EEProm so can be restored on start-up
+  eepromModeCheckAndUpdate(mode_flag);
   //end test
   EEPROM.commit();
 
@@ -682,78 +685,69 @@ void handleBrightness() {
 }
 
 void light_up_all() {
-  //FastLED
   fill_solid(leds, NUM_LEDS, CRGB(brightness * red_int / 255, brightness * green_int / 255, brightness * blue_int / 255));
   FastLED.show();
-  }
+}
 
 void turn_off_all() {
   mode_flag = 999;  //go to non-existent mode and turn off all pixels
   fill_solid(leds, NUM_LEDS, CRGB(0, 0, 0));
   FastLED.show();
-  }
+}
 
-void all_white_full(){
+void allWhiteFullBright(){
   mode_flag = 1;
   fill_solid(leds, NUM_LEDS, CRGB(255,255,255));
   FastLED.show();
 }
 
-void handle_mode1()  //fixed colour mode
-{
-  mode_flag = 1;
-  Serial.println("On Mode 1 - Fixed Color Mode");
-  EEPROM.write(4, mode_flag); //write mode to EEProm so can be restored on start-up
-  EEPROM.commit();
-  server.send ( 200, "text/html", "<SCRIPT language='JavaScript'>window.location='/';</SCRIPT>");
-  while (mode_flag == 1)  // Check the mode hasn't been changed whilst we wait, if so - leave immediately
-  {
-    light_up_all(); //set mode to default state - all led's on, fixed colour. This loop will service any brightness changes
-    loop();     // Not much to do except service the main loop
-  } return;
+//fixed colour mode
+void handle_mode1() {
+	mode_flag = 1;
+	Serial.println("On Mode 1 - Fixed Color Mode");
+	eepromModeCheckAndUpdate(mode_flag);
+	server.send ( 200, "text/html", "<SCRIPT language='JavaScript'>window.location='/';</SCRIPT>"); 
 }
 
-void handle_mode2() //colour fade mode
-{
-  mode_flag = 2;
-  Serial.println("On Mode 2 - Color Fade");
-  EEPROM.write(4, mode_flag); //write mode to EEProm so can be restored on start-up
-  EEPROM.commit();
-  server.send ( 200, "text/html", "<SCRIPT language='JavaScript'>window.location='/';</SCRIPT>");
-  uint16_t i, j, k;
-  int wait = 10;  //DON'T ever set this more than '10'. Use the 'k' value in the loop below to increase delays. This prevents the watchdog timer timing out on the ESP8266
-  while (mode_flag == 2)
-  {
-    for (j = 0; j < 256; j++)
-    {
-      loop();
-      for (i = 0; i < NUM_LEDS; i++)
-      {
-        loop();
-        //startIndex = 0;
-        //startIndex = startIndex + 1;
-        currentPalette = PartyColors_p;
-        currentBlending = LINEARBLEND;
-        //FillLEDsFromPaletteColors(startIndex);
-        //FastLED.show();
-      } loop();
-      //startIndex = 0;
-      for (k = 0; k < 200; k++) // Do ten loops of the 'wait' and service loop routine inbetween. Total wait = 10 x 'wait'. This prevents sluggishness in the browser html front end menu.
-      {
-        delay(wait);
-        loop();
-      } loop();
-    }
-    return;
-  }
+//colour fade mode
+void handle_mode2() {
+	mode_flag = 2;
+	Serial.println("On Mode 2 - Color Fade");
+	eepromModeCheckAndUpdate(mode_flag);
+	server.send ( 200, "text/html", "<SCRIPT language='JavaScript'>window.location='/';</SCRIPT>");
+	uint16_t i, j, k;
+	int wait = 10;  //DON'T ever set this more than '10'. Use the 'k' value in the loop below to increase delays. This prevents the watchdog timer timing out on the ESP8266
+	while (mode_flag == 2)
+	{
+	for (j = 0; j < 256; j++)
+	{
+	  loop();
+	  for (i = 0; i < NUM_LEDS; i++)
+	  {
+		loop();
+		//startIndex = 0;
+		//startIndex = startIndex + 1;
+		currentPalette = PartyColors_p;
+		currentBlending = LINEARBLEND;
+		//fillLEDsFromPaletteColors(startIndex);
+		//FastLED.show();
+	  } loop();
+	  //startIndex = 0;
+	  for (k = 0; k < 200; k++) // Do ten loops of the 'wait' and service loop routine inbetween. Total wait = 10 x 'wait'. This prevents sluggishness in the browser html front end menu.
+	  {
+		delay(wait);
+		loop();
+	  } loop();
+	}
+	return;
+	}
 }
 
-void handle_mode3() //rainbow mode
-{
+//rainbow mode
+void handle_mode3() {
   mode_flag = 3;
   Serial.println("On Mode 3 - Rainbow");
-  EEPROM.write(4, mode_flag);   //write mode to EEProm so can be restored on start-up
-  EEPROM.commit();
+  eepromModeCheckAndUpdate(mode_flag);
   server.send ( 200, "text/html", "<SCRIPT language='JavaScript'>window.location='/';</SCRIPT>");
   uint16_t i, j, k;
   int wait = 10;  //DON'T ever set this more than '10'. Use the 'k' value in the loop below to increase delays. This prevents the watchdog timer timing out on the ESP8266
@@ -767,7 +761,7 @@ void handle_mode3() //rainbow mode
         loop();
         currentPalette = RainbowColors_p;
         currentBlending = LINEARBLEND;
-        //FillLEDsFromPaletteColors(startIndex);
+        //fillLEDsFromPaletteColors(startIndex);
         //FastLED.show();
       }
       
@@ -782,12 +776,11 @@ void handle_mode3() //rainbow mode
   } return;
 }
 
-void handle_mode4() //Random mode
-{
+//Random mode
+void handle_mode4() {
   mode_flag = 4;
   Serial.println("On Mode 4 - Random");
-  EEPROM.write(4, mode_flag); //write mode to EEProm so can be restored on start-up
-  EEPROM.commit();
+  eepromModeCheckAndUpdate(mode_flag);
   server.send ( 200, "text/html", "<SCRIPT language='JavaScript'>window.location='/';</SCRIPT>");
   uint16_t i, j, k;
   int wait = 10;  //DON'T ever set this more than '10'. Use the 'k' value in the loop below to increase delays. This prevents the watchdog timer timing out on the ESP8266
@@ -811,12 +804,11 @@ void handle_mode4() //Random mode
   } return;
 }
 
-void handle_mode5() //Palette Select, Linearblend mode
-{
+//Palette Select, Linearblend mode
+void handle_mode5() {
   mode_flag = 5;
   Serial.println("On Mode 5 - Palette Picker");
-  EEPROM.write(4, mode_flag); //write mode to EEProm so can be restored on start-up
-  EEPROM.commit();
+  eepromModeCheckAndUpdate(mode_flag);
   server.send ( 200, "text/html", "<SCRIPT language='JavaScript'>window.location='/';</SCRIPT>");
   uint16_t i, j, k;
   int wait = 10;  //DON'T ever set this more than '10'. Use the 'k' value in the loop below to increase delays. This prevents the watchdog timer timing out on the ESP8266
@@ -841,12 +833,11 @@ void handle_mode5() //Palette Select, Linearblend mode
   } return;
 }
 
-void handle_mode6()  //Palette Select, Noblending mode
-{
+//Palette Select, Noblending mode
+void handle_mode6() {
   mode_flag = 6;
   Serial.println("On Mode 6 - Palette Picker");
-  EEPROM.write(4, mode_flag); //write mode to EEProm so can be restored on start-up
-  EEPROM.commit();
+  eepromModeCheckAndUpdate(mode_flag);
   server.send ( 200, "text/html", "<SCRIPT language='JavaScript'>window.location='/';</SCRIPT>");
   uint16_t i, j, k;
   int wait = 10;  //DON'T ever set this more than '10'. Use the 'k' value in the loop below to increase delays. This prevents the watchdog timer timing out on the ESP8266
@@ -871,11 +862,10 @@ void handle_mode6()  //Palette Select, Noblending mode
   } return;
 }
 
-void handle_cloud(){
+void handle_cloud() {
   mode_flag = 5;
   Serial.println("On Mode Cloud - flag 5");
-  EEPROM.write(4, mode_flag); //write mode to EEProm so can be restored on start-up
-  EEPROM.commit();
+  eepromModeCheckAndUpdate(mode_flag);
   server.send ( 200, "text/html", "<SCRIPT language='JavaScript'>window.location='/';</SCRIPT>");
   uint16_t i, j, k;
   int wait = 10;  //DON'T ever set this more than '10'. Use the 'k' value in the loop below to increase delays. This prevents the watchdog timer timing out on the ESP8266
@@ -900,11 +890,10 @@ void handle_cloud(){
   } return;
 }
 
-void handle_party(){
+void handle_party() {
   mode_flag = 5;
   Serial.println("On Mode Party - flag 5");
-  EEPROM.write(4, mode_flag); //write mode to EEProm so can be restored on start-up
-  EEPROM.commit();
+  eepromModeCheckAndUpdate(mode_flag);
   server.send ( 200, "text/html", "<SCRIPT language='JavaScript'>window.location='/';</SCRIPT>");
   uint16_t i, j, k;
   int wait = 10;  //DON'T ever set this more than '10'. Use the 'k' value in the loop below to increase delays. This prevents the watchdog timer timing out on the ESP8266
@@ -929,11 +918,10 @@ void handle_party(){
   } return;
 }
 
-void handle_heat(){
+void handle_heat() {
   mode_flag = 5;
   Serial.println("On Mode Heat - flag 5");
-  EEPROM.write(4, mode_flag); //write mode to EEProm so can be restored on start-up
-  EEPROM.commit();
+  eepromModeCheckAndUpdate(mode_flag);
   server.send ( 200, "text/html", "<SCRIPT language='JavaScript'>window.location='/';</SCRIPT>");
   uint16_t i, j, k;
   int wait = 10;  //DON'T ever set this more than '10'. Use the 'k' value in the loop below to increase delays. This prevents the watchdog timer timing out on the ESP8266
@@ -958,15 +946,13 @@ void handle_heat(){
   } return;
 }
 
-void handle_ocean(){
+void handle_ocean() {
   mode_flag = 5;
   Serial.println("On Mode Ocean - flag 5");
-  EEPROM.write(4, mode_flag); //write mode to EEProm so can be restored on start-up
-  EEPROM.commit();
+  eepromModeCheckAndUpdate(mode_flag);
   server.send ( 200, "text/html", "<SCRIPT language='JavaScript'>window.location='/';</SCRIPT>");
   uint16_t i, j, k;
   int wait = 10;  //DON'T ever set this more than '10'. Use the 'k' value in the loop below to increase delays. This prevents the watchdog timer timing out on the ESP8266
-  //mode_flag = 4;
   while (mode_flag == 5)  // do this indefenitely or until mode changes
   {
     for (j = 0; j < 256; j++) // 5 cycles of all colors on wheel
