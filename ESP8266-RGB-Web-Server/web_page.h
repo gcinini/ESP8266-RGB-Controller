@@ -1,0 +1,149 @@
+// web_page.h - the single-page web interface served at "/".
+//
+// Copyright (c) 2019-2026 G Cinini
+// SPDX-License-Identifier: MIT
+//
+// The page talks to the lamp through small JSON endpoints (see README.md):
+//   /state, /power, /colour, /brightness, /mode, /palette
+// It polls /state every few seconds, so changes made through Adafruit IO show up too.
+// Colour selection uses the browser's built-in <input type="color"> picker.
+
+#pragma once
+
+static const char WEB_PAGE[] PROGMEM = R"page(<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lightbox</title>
+<style>
+  :root {
+    --bg: #14161a; --card: #1e2228; --line: #2d333c;
+    --text: #e8ebf0; --muted: #98a1ae; --accent: #ffb454; --accent-ink: #1d1400;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 520px; margin: 0 auto; padding: 20px 16px 40px; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  #status { color: var(--muted); margin: 0 0 18px; font-size: .9rem; min-height: 1.2em; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+            padding: 14px 16px 16px; margin-bottom: 12px; }
+  h2 { display: flex; justify-content: space-between; font-size: .75rem; font-weight: 600;
+       letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 12px; }
+  h2 span { color: var(--text); letter-spacing: 0; font-variant-numeric: tabular-nums; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+  button { min-height: 44px; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line);
+           background: #262b33; color: var(--text); font: inherit; font-size: .95rem; cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+  button.active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  input[type=color] { display: block; width: 100%; height: 56px; padding: 0; border: 0;
+                      border-radius: 10px; background: none; cursor: pointer; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .hint { color: var(--muted); font-size: .8rem; margin: 8px 0 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Lightbox</h1>
+  <p id="status">Connecting&hellip;</p>
+
+  <section>
+    <h2>Power</h2>
+    <div class="grid">
+      <button id="power-on">On</button>
+      <button id="power-off">Off</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Colour</h2>
+    <input type="color" id="colour" value="#ffb46b" aria-label="Lamp colour">
+    <p class="hint">Picking a colour switches to Solid colour mode.</p>
+  </section>
+
+  <section>
+    <h2>Brightness <span id="brightness-value"></span></h2>
+    <input type="range" id="brightness" min="1" max="255" aria-label="Brightness">
+  </section>
+
+  <section>
+    <h2>Mode</h2>
+    <div class="grid" id="modes"></div>
+  </section>
+
+  <section>
+    <h2>Palette</h2>
+    <div class="grid" id="palettes"></div>
+    <p class="hint">Used by the two palette modes.</p>
+  </section>
+</main>
+
+<script>
+  const MODES = [
+    [1, 'Solid colour'], [2, 'Colour fade'], [3, 'Rainbow'],
+    [4, 'Random'], [5, 'Palette, smooth'], [6, 'Palette, stepped']
+  ];
+  const el = id => document.getElementById(id);
+  let paletteNames = null;
+
+  function makeButton(label, onClick) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
+  // Calls one of the lamp's endpoints; every endpoint answers with the full state.
+  function send(path) {
+    return fetch('/' + path)
+      .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(render)
+      .catch(() => { el('status').textContent = 'Lamp not responding'; });
+  }
+
+  // Limits how often a slider or the colour picker sends updates while being dragged.
+  function throttle(fn, ms) {
+    let last = 0, timer = null;
+    return () => {
+      clearTimeout(timer);
+      const wait = ms - (Date.now() - last);
+      if (wait <= 0) { last = Date.now(); fn(); }
+      else timer = setTimeout(() => { last = Date.now(); fn(); }, wait);
+    };
+  }
+
+  function render(s) {
+    if (!paletteNames) {
+      paletteNames = s.palettes;
+      paletteNames.forEach((name, i) => el('palettes').appendChild(makeButton(name, () => send('palette?id=' + i))));
+    }
+    const mode = MODES.find(m => m[0] === s.mode);
+    let text = s.on ? 'On' : 'Off';
+    if (mode) text += ' · ' + mode[1];
+    if (s.mode >= 5) text += ' · ' + paletteNames[s.palette];
+    el('status').textContent = text;
+
+    el('power-on').classList.toggle('active', s.on);
+    el('power-off').classList.toggle('active', !s.on);
+    [...el('modes').children].forEach((b, i) => b.classList.toggle('active', s.on && MODES[i][0] === s.mode));
+    [...el('palettes').children].forEach((b, i) => b.classList.toggle('active', s.mode >= 5 && i === s.palette));
+
+    // Don't move a control the user is currently dragging
+    if (document.activeElement !== el('colour')) el('colour').value = s.colour;
+    if (document.activeElement !== el('brightness')) el('brightness').value = s.brightness;
+    el('brightness-value').textContent = Math.round(s.brightness * 100 / 255) + '%';
+  }
+
+  MODES.forEach(([id, label]) => el('modes').appendChild(makeButton(label, () => send('mode?id=' + id))));
+  el('power-on').addEventListener('click', () => send('power?on=1'));
+  el('power-off').addEventListener('click', () => send('power?on=0'));
+  el('colour').addEventListener('input', throttle(() => send('colour?hex=' + el('colour').value.slice(1)), 150));
+  el('brightness').addEventListener('input', throttle(() => send('brightness?value=' + el('brightness').value), 150));
+
+  send('state');
+  setInterval(() => { if (!document.hidden) send('state'); }, 5000);
+</script>
+</body>
+</html>
+)page";
