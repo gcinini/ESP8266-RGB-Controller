@@ -1,4 +1,5 @@
-/*	ESP8266WiFiWebServer v 3.0
+/*	ESP8266WiFiWebServer v 3.0.1
+    ESP8266 RGB Web Server
 
 	Previous version c 2.1
 		Copyright (c) 2015, Majenko Technologies
@@ -6,8 +7,17 @@
 		https://github.com/Makerspaceteam04/Arduino-ESP8266-RGB-Web-Server
 		Original project found here https://github.com/giznoise/Arduino-ESP8266-RGB-Web-Server
 */
+// This sketch is a web server that controls an RGB LED strip using an ESP8266 microcontroller.
+// It allows users to change the color and brightness of the LEDs through a web interface.
+// The code also includes MQTT functionality for remote control and OTA updates for firmware upgrades.
+// The sketch uses the FastLED library for LED control and LittleFS for file system management.
+// The web server serves HTML pages and handles user input to control the LED strip.
+// The code is designed to be run on an ESP8266 microcontroller and requires the ESP8266WiFi, FastLED, and other libraries.
+// The code is structured to handle different modes of operation, including fixed color, rainbow, and random color modes.
+// It also includes functions for handling color selection, brightness adjustment, and palette selection.
+// The code is modular and includes functions for setting up the web server, handling MQTT messages, and managing OTA updates.
+// The code is designed to be user-friendly and provides a simple interface for controlling the LED strip.
 
-//Public Release Version
 
 // Includes and Setup
 #include <ESP8266WiFi.h>
@@ -19,7 +29,7 @@
 #include <PubSubClient.h>
 
 #define HOSTNAME lightbox1
-// #define FASTLED_ESP8266_RAW_PIN_ORDER //Refer to FastLED notes on ESP8266 for an explanation on these modes
+#define FASTLED_ESP8266_RAW_PIN_ORDER //Refer to FastLED notes on ESP8266 for an explanation on these modes
 //This define must be called before including FastLED
 #include <FastLED.h>
 
@@ -30,24 +40,25 @@
 #define DATA_PIN  D4 // Using WeMos D4 pin for the control line
 #define NUM_LEDS  30 // Make sure you change this to the number of LEDs in the strip
 #define LED_TYPE  WS2812B
-#define COLOR_ORDER GRB // LED order for WS2812B
+#define COLOR_ORDER GRB
 #define UPDATES_PER_SECOND 50
 static uint8_t startIndex = 0;
-CRGB leds[NUM_LEDS]; // Define the array of leds
+CRGB leds[NUM_LEDS];
 CRGBPalette16 currentPalette;
 TBlendType    currentBlending;
 
 extern CRGBPalette16 myRedWhiteBluePalette;
 extern const TProgmemPalette16 myRedWhiteBluePalette_p PROGMEM;
-
 //End FastLED defines
 
 //MQTT Connection Setup
 #define mqtt_server "io.adafruit.com"
 #define mqtt_user "gcinini"
 #define mqtt_password "***REMOVED***"
+
 WiFiClient espClient;			// Declares a WiFiClient Object using ESP8266WiFi
 PubSubClient client(espClient); // instanciates Pubsub MQTT client
+
 #define control_topic "gcinini/feeds/espweb.onoff"
 #define color_topic "gcinini/feeds/espweb.color"
 #define brightness_topic "gcinini/feeds/espweb.brightness"
@@ -75,53 +86,56 @@ uint32_t Wheel(byte);
 String getContentType(String filename); // convert the file extension to the MIME type
 bool handleFileRead(String path);       // send the right file to the client (if it exists)
 
-// Functions dummy defs
-void allWhiteFullBright();
-void handleIndex();
-void handleNotFound();
-void handleSwitchOn();
-void handleSwitchOff();
-void handleSetColour();
-void handleColour();
-void handleSetBrightness();
-void handleBrightness();
-void handleSelectMode();
-void handleSelectPalette(); //Select palette
-void handle_mode1();
-void handle_mode2();
-void handle_mode3();
-void handle_mode4();
-void handle_mode5(); //Palette selection mode
-void handle_mode6();
-void light_up_all();
-void turn_off_all();
-void handle_cloud();
-void handle_party();
-void handle_heat();
-void handle_ocean();
-void setupWiFi();
-void setupMDNS ();
-void reconnectMQTT();
-void callback(char* topic, byte* payload, unsigned int length);
-void setupOTA ();
-void fillLEDsFromPaletteColors( uint8_t colorIndex);
-void ChangePalettePeriodically();
-void SetupTotallyRandomPalette(); // This function fills the palette with totally random colors.
-void SetupBlackAndWhiteStripedPalette(); // This function sets up a palette of black and white stripes
-void setupPurpleAndGreenPalette(); // This function sets up a palette of purple and green stripes.
-void handleColour(); 
-void handleBrightness();
-void light_up_all();
-void turn_off_all();
+// Function declarations with brief purpose notes.
+void allWhiteFullBright();                 // Set all LEDs to full white.
+void handleIndex();                        // Serve the main web UI page.
+void handleNotFound();                     // Return a 404 for missing files/routes.
+void handleSwitchOn();                     // Restore the saved mode and turn LEDs on.
+void handleSwitchOff();                    // Turn the strip off and restore default state.
+void handleSetColour();                    // Serve the colour picker page.
+void handleColour();                       // Receive a hex colour from the web UI and update LEDs.
+void handleSetBrightness();                // Serve the brightness control page.
+void handleBrightness();                   // Receive a brightness value and apply it.
+void handleSelectMode();                   // Serve the mode selection page.
+void handleSelectPalette();                // Serve the palette selection page.
+void handle_mode1();                       // Fixed-colour mode.
+void handle_mode2();                       // Colour fade / party palette mode.
+void handle_mode3();                       // Rainbow animation mode.
+void handle_mode4();                       // Random palette cycling mode.
+void handle_mode5();                       // Palette animation with linear blending.
+void handle_mode6();                       // Palette animation with no blending.
+void light_up_all();                       // Fill the strip with the current RGB colour.
+void turn_off_all();                       // Turn all LEDs off.
+void handle_cloud();                       // Cloud palette animation mode.
+void handle_party();                       // Party palette animation mode.
+void handle_heat();                        // Heat palette animation mode.
+void handle_ocean();                       // Ocean palette animation mode.
+void setupWiFi();                          // Connect to the configured WiFi network.
+void setupMDNS();                          // Start the mDNS responder for local discovery.
+void reconnectMQTT();                      // Reconnect to the MQTT broker if disconnected.
+void callback(char* topic, byte* payload, unsigned int length); // Process incoming MQTT messages.
+void setupOTA();                           // Enable Over-The-Air firmware updates.
+void fillLEDsFromPaletteColors(uint8_t colorIndex); // Apply palette colors across the LED strip.
+void ChangePalettePeriodically();           // Advance the active palette over time.
+void SetupTotallyRandomPalette();          // Fill the current palette with random colours.
+void SetupBlackAndWhiteStripedPalette();   // Create a black-and-white striped palette.
+void setupPurpleAndGreenPalette();         // Create a purple/green striped palette.
+void handleColour();                       // Alias for the hex colour handler.
+void handleBrightness();                   // Alias for the brightness handler.
+void light_up_all();                       // Alias for the fixed-colour renderer.
+void turn_off_all();                       // Alias for the LED shutdown helper.
 
+// Custom palette used for red/white/blue themed animations.
+// The 16 entries form a repeating pattern of red, gray, blue, and black,
+// creating a striped color cycle that is easier on the eyes than pure white.
+//
+// Storing this palette in PROGMEM keeps the data in flash memory instead of RAM,
+// which is important on an ESP8266 where RAM is limited. FastLED can read it
+// from flash when the animation is rendered.
 const TProgmemPalette16 myRedWhiteBluePalette_p PROGMEM =
 {
-	// This example shows how to set up a static color palette
-	// which is stored in PROGMEM (flash), which is almost always more
-	// plentiful than RAM.  A static PROGMEM palette like this
-	// takes up 64 bytes of flash.
   CRGB::Red,
-  CRGB::Gray, // 'white' is too bright compared to red and blue
+  CRGB::Gray, // Gray is used instead of white to avoid an overly bright look
   CRGB::Blue,
   CRGB::Black,
 
@@ -141,8 +155,8 @@ const TProgmemPalette16 myRedWhiteBluePalette_p PROGMEM =
 };
 
 // SETUP
-void setup (void) {
-  Serial.begin (115200);
+void setup(void) {
+  Serial.begin ( 115200 );
   
   //WiFi.setSleepMode(WIFI_NONE_SLEEP);
   
@@ -150,12 +164,9 @@ void setup (void) {
   FastLED.setDither(1); //Allows for low brightness not to flicker
   //FastLED.setMaxPowerInVoltsAndMilliamps(5, 900);
 
-  setupWiFi(); 	// call setupWiFi function
-
+  setupWiFi(); 	// setup WiFi connection
   // setupMDNS (); // call setupMDNS function
-
   setupOTA ();  // setup Arduino Over the air updating
-
   EEPROM.begin(5); // set up EEPROM storage space for config values
   
   // MQTT Setup
@@ -197,13 +208,10 @@ void setup (void) {
   brightness = EEPROM.read(3);
   mode_flag = EEPROM.read(4);
   
-  LittleFS.begin();
+  LittleFS.begin(); // Initialize LittleFS
   server.begin(); // Instantiate HTTP server handler
-  Serial.println ( "HTTP server started" );
-  Serial.println ("");
-  handleSwitchOn();
+  handleSwitchOn(); // Call the switch-on function to set the initial state of the LEDs
 }
-
 
 
 void loop ( void ) {
@@ -212,7 +220,8 @@ void loop ( void ) {
     reconnectMQTT();
   }
   client.loop(); // PubsubClient client process incoming messages and maintains MQTT connection to server
-
+	Serial.print ( "Mode: ");
+  Serial.println (mode_flag);
 	//MDNS.update();
 	
 	ArduinoOTA.handle(); // Services OverTheAir Update requests
@@ -332,10 +341,9 @@ void eepromModeCheckAndUpdate(int mode) {
   EEPROM.write(4, mode);
   EEPROM.commit();
   Serial.println("EEPROM mode updated");
-  Serial.print("Mode ");
-  Serial.println(mode);
 }
  
+
 
 //MQTT Callback function
 void callback(char* topic, byte* payload, unsigned int length) {
@@ -413,7 +421,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
   Serial.println();
 }
 
-// Over the Air Update support setup and startup
+// Over-the-Air Update support setup and startup
 void setupOTA () {
 	ArduinoOTA.setHostname("lightbox1");
 	ArduinoOTA.onStart([]() {
@@ -485,7 +493,7 @@ bool handleFileRead(String path) {
 
 
 void handleSwitchOn() {
-  mode_flag = EEPROM.read(4); // start-up in last saved mode
+  mode_flag = EEPROM.read(4); // Read mode flag from EEPROM
   delay(100);
   switch (mode_flag) {
     case 1: handle_mode1();
@@ -972,3 +980,4 @@ void handle_ocean() {
     }
   } return;
 }
+	
