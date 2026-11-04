@@ -12,3 +12,7 @@
 // Adafruit IO (MQTT) - username and "Active Key" from io.adafruit.com
 #define MQTT_USER      "your-adafruit-io-username"
 #define MQTT_KEY       "your-adafruit-io-key"
+
+// Optional: password for over-the-air updates. If you set one, PlatformIO needs
+// it too - see the OTA section of README.md.
+// #define OTA_PASSWORD   "choose-an-ota-password"

@@ -1,5 +1,5 @@
 /*
-  ESP8266 RGB Controller  v3.1.0
+  ESP8266 RGB Controller  v3.2.0
 
   Wi-Fi controller for a WS2812B LED lamp on a Wemos D1 Mini (ESP8266).
   Control it from the built-in web page or through Adafruit IO (MQTT).
@@ -43,12 +43,23 @@
 #define LED_TYPE   WS2812B
 #define LED_ORDER  GRB
 
-const char    *DEVICE_NAME     = "lightbox1";   // network / OTA name
+const char    *FIRMWARE_VERSION = "3.2.0-ota";
+const char    *DEVICE_NAME     = "ESP-lightbox1";   // network / OTA name
 const uint32_t FRAME_INTERVAL  = 20;            // ms per animation frame (50 fps)
 const uint32_t MQTT_RETRY_MS   = 5000;          // wait between MQTT reconnect attempts
 const uint32_t SAVE_DELAY_MS   = 2000;          // write settings this long after the last change
 const uint32_t RANDOM_HOLD_MS  = 8000;          // how long Random mode keeps each palette
 const float    COLOUR_GAMMA    = 2.6f;          // makes picked colours look right on LEDs
+
+// Candle mode lights only the bottom of the lamp, like a tea light in a jar.
+const uint8_t  CANDLE_LEDS       = 14;          // how many LEDs form the flame
+const bool     CANDLE_AT_LED_ZERO = true;       // true if LED 0 is at the bottom of the lamp
+
+// Status reports to Adafruit IO (feed espweb.outtopic). The free plan allows
+// 30 messages a minute, so reports are grouped and spaced out.
+const uint32_t STATUS_SETTLE_MS   = 1500;       // wait for changes to settle before reporting
+const uint32_t STATUS_MIN_GAP_MS  = 5000;       // never report more often than this
+const uint32_t STATUS_HEARTBEAT_MS = 600000;    // report every 10 minutes even without changes
 
 const char *MQTT_HOST = "io.adafruit.com";
 const uint16_t MQTT_PORT = 1883;
@@ -64,8 +75,24 @@ const uint8_t MODE_RAINBOW         = 3;   // rainbow moving along the strip
 const uint8_t MODE_RANDOM          = 4;   // a different palette every few seconds
 const uint8_t MODE_PALETTE_SMOOTH  = 5;   // chosen palette, blended
 const uint8_t MODE_PALETTE_STEPPED = 6;   // chosen palette, hard steps
+const uint8_t MODE_CANDLE          = 7;   // flickering candle at the bottom of the lamp
 const uint8_t MODE_MIN = MODE_SOLID;
-const uint8_t MODE_MAX = MODE_PALETTE_STEPPED;
+const uint8_t MODE_MAX = MODE_CANDLE;
+
+// Display names (index = mode number) and the words MQTT accepts for each mode.
+const char *const MODE_NAMES[] = {
+  "", "Solid colour", "Colour fade", "Rainbow", "Random", "Palette, smooth", "Palette, stepped", "Candle"
+};
+
+struct ModeWord {
+  const char *word;
+  uint8_t mode;
+};
+const ModeWord MODE_WORDS[] = {
+  { "solid", MODE_SOLID },   { "fade", MODE_FADE },               { "rainbow", MODE_RAINBOW },
+  { "random", MODE_RANDOM }, { "smooth", MODE_PALETTE_SMOOTH },   { "palette", MODE_PALETTE_SMOOTH },
+  { "stepped", MODE_PALETTE_STEPPED },                            { "candle", MODE_CANDLE },
+};
 
 struct NamedPalette {
   const char *name;
@@ -108,10 +135,13 @@ WiFiClient       mqttSocket;
 PubSubClient     mqtt(mqttSocket);
 
 // Adafruit IO feed topics, built from MQTT_USER in setup()
-String topicPower, topicColour, topicBrightness, topicButton, topicHello;
+String topicPower, topicColour, topicBrightness, topicButton, topicStatus;
 
 bool     savePending = false;
 uint32_t lastChangeAt = 0;
+
+bool     statusPending = true;    // send a report as soon as Adafruit IO connects
+uint32_t lastStatusAt = 0;
 
 
 // ===========================================================================
@@ -130,7 +160,13 @@ bool colourFromText(String text, CRGB &out);
 // Drawing
 void drawFrame();
 void drawPaletteAlongStrip();
+void drawCandle();
 void pickRandomPalette();
+
+// Status
+String statusText();
+String uptimeText();
+void publishStatusIfDue();
 
 // Settings in flash
 void loadSettings();
@@ -150,12 +186,12 @@ String stateAsJson();
 
 
 // ===========================================================================
-// setup() and loop()
+// ========     setup() and loop()                                     =======
 // ===========================================================================
 void setup() {
   Serial.begin(115200);
   Serial.println();
-  Serial.println("ESP8266 RGB Controller v3.1.0");
+  Serial.printf("ESP8266 RGB Controller v%s\n", FIRMWARE_VERSION);
 
   FastLED.addLeds<LED_TYPE, LED_PIN, LED_ORDER>(leds, LED_COUNT).setCorrection(TypicalLEDStrip);
   FastLED.setDither(1);
@@ -169,9 +205,10 @@ void setup() {
   topicColour     = String(MQTT_USER) + "/feeds/espweb.color";
   topicBrightness = String(MQTT_USER) + "/feeds/espweb.brightness";
   topicButton     = String(MQTT_USER) + "/feeds/espweb.button";
-  topicHello      = String(MQTT_USER) + "/feeds/espweb.outtopic";
+  topicStatus     = String(MQTT_USER) + "/feeds/espweb.outtopic";
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setCallback(onMqttMessage);
+  mqtt.setBufferSize(512);   // room for the status report (the default is 256 bytes)
 }
 
 void loop() {
@@ -180,6 +217,7 @@ void loop() {
   serviceMqtt();
   drawFrame();
   saveSettingsIfDue();
+  publishStatusIfDue();
 }
 
 
@@ -196,7 +234,7 @@ void setMode(uint8_t mode) {
   if (mode < MODE_MIN || mode > MODE_MAX) return;
   lamp.mode = mode;
   lamp.on = true;
-  Serial.printf("Mode %u\n", mode);
+  Serial.printf("Mode %s\n", MODE_NAMES[mode]);
   lampChanged();
 }
 
@@ -232,6 +270,7 @@ void lampChanged() {
                      applyGamma_video(lamp.colour.b, COLOUR_GAMMA));
   preparePalette();
   savePending = true;
+  statusPending = true;
   lastChangeAt = millis();
 }
 
@@ -343,6 +382,10 @@ void drawFrame() {
       drawPaletteAlongStrip();
       break;
 
+    case MODE_CANDLE:
+      drawCandle();
+      break;
+
     default:   // rainbow and the two palette modes
       animationPhase++;
       drawPaletteAlongStrip();
@@ -356,6 +399,42 @@ void drawPaletteAlongStrip() {
   const uint8_t spacing = 4;   // palette steps between neighbouring LEDs
   for (uint16_t i = 0; i < LED_COUNT; i++) {
     leds[i] = ColorFromPalette(activePalette, animationPhase + i * spacing, 255, activeBlend);
+  }
+}
+
+// Candle mode: a warm flame at the bottom of the lamp, brightest at its base and
+// dimmer and redder towards the tip. Slow noise makes the whole flame breathe,
+// faster noise makes each LED shimmer, and now and then a "draught" makes it dip.
+void drawCandle() {
+  static uint16_t noiseClock = 0;
+  static uint8_t draught = 0;          // how far the flame is currently dipping
+
+  noiseClock += 7;
+  if (draught > 0) {
+    draught = qsub8(draught, 5);       // recover over a few hundred milliseconds
+  } else if (random8() == 0) {         // about once every 5 seconds at 50 fps
+    draught = random8(60, 130);
+  }
+
+  uint8_t flame = qadd8(150, scale8(inoise8(noiseClock), 105));   // overall level 150-255
+  flame = qsub8(flame, draught);
+
+  const CRGB base(255, 147, 41);       // the yellow-orange of a candle flame
+  const CRGB tip(255, 64, 6);          // deeper orange at the top of the flame
+
+  FastLED.clear();
+  for (uint8_t i = 0; i < CANDLE_LEDS && i < LED_COUNT; i++) {
+    uint8_t height = (CANDLE_LEDS > 1) ? (uint16_t)i * 255 / (CANDLE_LEDS - 1) : 0;   // 0 = base, 255 = tip
+    uint8_t shimmer = inoise8((uint16_t)i * 50, noiseClock * 3);
+
+    uint8_t level = scale8(flame, 255 - scale8(height, 180));       // fade out towards the tip
+    level = scale8(level, 190 + scale8(shimmer, 65));               // per-LED shimmer
+
+    CRGB colour = blend(base, tip, height);
+    colour.nscale8_video(level);
+
+    uint8_t index = CANDLE_AT_LED_ZERO ? i : (LED_COUNT - 1 - i);
+    leds[index] = colour;
   }
 }
 
@@ -450,6 +529,9 @@ void connectWiFi() {
 
 void startOta() {
   ArduinoOTA.setHostname(DEVICE_NAME);
+#ifdef OTA_PASSWORD
+  ArduinoOTA.setPassword(OTA_PASSWORD);   // optional, set in secrets.h
+#endif
   ArduinoOTA.onStart([]() {
     Serial.println("OTA update starting");
     FastLED.clear(true);   // LEDs off while flashing
@@ -482,7 +564,8 @@ void serviceMqtt() {
     mqtt.subscribe(topicColour.c_str());
     mqtt.subscribe(topicBrightness.c_str());
     mqtt.subscribe(topicButton.c_str());
-    mqtt.publish(topicHello.c_str(), "hello world");
+    statusPending = true;   // report the current state straight away
+    lastStatusAt = 0;
   } else {
     Serial.printf("failed (state %d), retrying in %lu s\n", mqtt.state(), (unsigned long)(MQTT_RETRY_MS / 1000));
   }
@@ -492,7 +575,10 @@ void serviceMqtt() {
 //   espweb.brightness  0-100
 //   espweb.color       colour name ("Blue", "Hot Pink") or hex ("#FF8800")
 //   espweb.onoff and espweb.button
-//                      ON, OFF, FADE, RAINBOW, RANDOM, WHITE
+//                      ON, OFF, WHITE,
+//                      SOLID, FADE, RAINBOW, RANDOM, SMOOTH (or PALETTE), STEPPED, CANDLE,
+//                      or a palette name: CLOUD, OCEAN, PARTY, HEAT, FOREST, LAVA
+//   espweb.outtopic    (published by the lamp) status report
 void onMqttMessage(char *topic, byte *payload, unsigned int length) {
   String feed(topic);
   String text;
@@ -515,13 +601,64 @@ void onMqttMessage(char *topic, byte *payload, unsigned int length) {
   }
 
   text.toLowerCase();
-  if      (text == "on")      setPower(true);
-  else if (text == "off")     setPower(false);
-  else if (text == "fade")    setMode(MODE_FADE);
-  else if (text == "rainbow") setMode(MODE_RAINBOW);
-  else if (text == "random")  setMode(MODE_RANDOM);
-  else if (text == "white")   setColour(CRGB::White);
-  else Serial.println("  unknown command");
+  if (text == "on")    return setPower(true);
+  if (text == "off")   return setPower(false);
+  if (text == "white") return setColour(CRGB::White);
+
+  for (const ModeWord &m : MODE_WORDS) {
+    if (text == m.word) return setMode(m.mode);
+  }
+  for (uint8_t i = 0; i < PALETTE_COUNT; i++) {
+    if (text.equalsIgnoreCase(PALETTES[i].name)) return setPalette(i);
+  }
+  Serial.println("  unknown command");
+}
+
+// The report shown in the dashboard's status block.
+String statusText() {
+  String s;
+  s.reserve(260);
+  s += "Power: ";       s += lamp.on ? "On" : "Off";
+  s += "\nMode: ";      s += MODE_NAMES[lamp.mode];
+  if (lamp.mode == MODE_PALETTE_SMOOTH || lamp.mode == MODE_PALETTE_STEPPED) {
+    s += "\nPalette: "; s += PALETTES[lamp.palette].name;
+  }
+  if (lamp.mode == MODE_SOLID) {
+    char hex[8];
+    snprintf(hex, sizeof(hex), "#%02X%02X%02X", lamp.colour.r, lamp.colour.g, lamp.colour.b);
+    s += "\nColour: ";  s += hex;
+  }
+  s += "\nBrightness: "; s += (lamp.brightness * 100 + 127) / 255; s += "%";
+  s += "\nWi-Fi: ";     s += WiFi.SSID(); s += " ("; s += WiFi.RSSI(); s += " dBm)";
+  s += "\nIP: ";        s += WiFi.localIP().toString();
+  s += "\nHost: ";      s += DEVICE_NAME; s += ".local";
+  s += "\nFirmware: v"; s += FIRMWARE_VERSION; s += ", up "; s += uptimeText();
+  return s;
+}
+
+String uptimeText() {
+  uint32_t minutes = millis() / 60000;
+  uint32_t days = minutes / 1440, hours = (minutes / 60) % 24, mins = minutes % 60;
+  char text[24];
+  if (days > 0) snprintf(text, sizeof(text), "%lud %luh %lum", (unsigned long)days, (unsigned long)hours, (unsigned long)mins);
+  else          snprintf(text, sizeof(text), "%luh %02lum", (unsigned long)hours, (unsigned long)mins);
+  return String(text);
+}
+
+// Sends the status report after a change has settled, never more often than
+// STATUS_MIN_GAP_MS, and every STATUS_HEARTBEAT_MS so the uptime stays current.
+void publishStatusIfDue() {
+  if (!mqtt.connected()) return;
+  uint32_t now = millis();
+  bool heartbeatDue = (now - lastStatusAt >= STATUS_HEARTBEAT_MS);
+  if (!statusPending && !heartbeatDue) return;
+  if (now - lastChangeAt < STATUS_SETTLE_MS) return;
+  if (lastStatusAt != 0 && now - lastStatusAt < STATUS_MIN_GAP_MS) return;
+
+  if (mqtt.publish(topicStatus.c_str(), statusText().c_str())) {
+    statusPending = false;
+    lastStatusAt = (now == 0) ? 1 : now;
+  }
 }
 
 
@@ -533,7 +670,7 @@ void onMqttMessage(char *topic, byte *payload, unsigned int length) {
 //   /power?on=1|0
 //   /colour?hex=RRGGBB        (a colour name also works)
 //   /brightness?value=1-255
-//   /mode?id=1-6
+//   /mode?id=1-7
 //   /palette?id=0-5
 void startWebServer() {
   web.on("/", []() { web.send_P(200, "text/html", WEB_PAGE); });
@@ -562,7 +699,7 @@ void startWebServer() {
 
   web.on("/mode", []() {
     long id = web.arg("id").toInt();
-    if (id < MODE_MIN || id > MODE_MAX) return replyBadRequest("id must be 1-6");
+    if (id < MODE_MIN || id > MODE_MAX) return replyBadRequest("id must be 1-7");
     setMode(id);
     replyWithState();
   });
@@ -593,7 +730,7 @@ String stateAsJson() {
   snprintf(colour, sizeof(colour), "#%02x%02x%02x", lamp.colour.r, lamp.colour.g, lamp.colour.b);
 
   String json;
-  json.reserve(200);
+  json.reserve(340);
   json += "{\"on\":";
   json += lamp.on ? "true" : "false";
   json += ",\"mode\":";       json += lamp.mode;
@@ -607,6 +744,12 @@ String stateAsJson() {
     json += PALETTES[i].name;
     json += '"';
   }
-  json += "]}";
+  json += "],\"host\":\"";    json += DEVICE_NAME;
+  json += "\",\"ip\":\"";     json += WiFi.localIP().toString();
+  json += "\",\"rssi\":";     json += WiFi.RSSI();
+  json += ",\"mqtt\":";       json += mqtt.connected() ? "true" : "false";
+  json += ",\"version\":\"";  json += FIRMWARE_VERSION;
+  json += "\",\"uptime\":\""; json += uptimeText();
+  json += "\"}";
   return json;
 }

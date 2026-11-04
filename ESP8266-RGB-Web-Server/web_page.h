@@ -41,6 +41,9 @@ static const char WEB_PAGE[] PROGMEM = R"page(<!doctype html>
                       border-radius: 10px; background: none; cursor: pointer; }
   input[type=range] { width: 100%; accent-color: var(--accent); }
   .hint { color: var(--muted); font-size: .8rem; margin: 8px 0 0; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0; font-size: .9rem; }
+  dt { color: var(--muted); }
+  dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -77,12 +80,17 @@ static const char WEB_PAGE[] PROGMEM = R"page(<!doctype html>
     <div class="grid" id="palettes"></div>
     <p class="hint">Used by the two palette modes.</p>
   </section>
+
+  <section>
+    <h2>Network</h2>
+    <dl id="network"></dl>
+  </section>
 </main>
 
 <script>
   const MODES = [
     [1, 'Solid colour'], [2, 'Colour fade'], [3, 'Rainbow'],
-    [4, 'Random'], [5, 'Palette, smooth'], [6, 'Palette, stepped']
+    [4, 'Random'], [5, 'Palette, smooth'], [6, 'Palette, stepped'], [7, 'Candle']
   ];
   const el = id => document.getElementById(id);
   let paletteNames = null;
@@ -119,20 +127,40 @@ static const char WEB_PAGE[] PROGMEM = R"page(<!doctype html>
       paletteNames.forEach((name, i) => el('palettes').appendChild(makeButton(name, () => send('palette?id=' + i))));
     }
     const mode = MODES.find(m => m[0] === s.mode);
+    const paletteMode = s.mode === 5 || s.mode === 6;
     let text = s.on ? 'On' : 'Off';
     if (mode) text += ' · ' + mode[1];
-    if (s.mode >= 5) text += ' · ' + paletteNames[s.palette];
+    if (paletteMode) text += ' · ' + paletteNames[s.palette];
     el('status').textContent = text;
 
     el('power-on').classList.toggle('active', s.on);
     el('power-off').classList.toggle('active', !s.on);
     [...el('modes').children].forEach((b, i) => b.classList.toggle('active', s.on && MODES[i][0] === s.mode));
-    [...el('palettes').children].forEach((b, i) => b.classList.toggle('active', s.mode >= 5 && i === s.palette));
+    [...el('palettes').children].forEach((b, i) => b.classList.toggle('active', paletteMode && i === s.palette));
 
     // Don't move a control the user is currently dragging
     if (document.activeElement !== el('colour')) el('colour').value = s.colour;
     if (document.activeElement !== el('brightness')) el('brightness').value = s.brightness;
     el('brightness-value').textContent = Math.round(s.brightness * 100 / 255) + '%';
+
+    const rows = [
+      ['Address', s.host + '.local \u00b7 ' + s.ip],
+      ['Wi-Fi', s.rssi + ' dBm (' + signalWord(s.rssi) + ')'],
+      ['Adafruit IO', s.mqtt ? 'Connected' : 'Not connected'],
+      ['Firmware', 'v' + s.version + ', up ' + s.uptime]
+    ];
+    el('network').replaceChildren(...rows.flatMap(([k, v]) => {
+      const dt = document.createElement('dt'); dt.textContent = k;
+      const dd = document.createElement('dd'); dd.textContent = v;
+      return [dt, dd];
+    }));
+  }
+
+  function signalWord(rssi) {
+    if (rssi >= -60) return 'strong';
+    if (rssi >= -72) return 'good';
+    if (rssi >= -82) return 'weak';
+    return 'very weak';
   }
 
   MODES.forEach(([id, label]) => el('modes').appendChild(makeButton(label, () => send('mode?id=' + id))));
