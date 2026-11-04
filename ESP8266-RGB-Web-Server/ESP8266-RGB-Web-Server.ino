@@ -1,95 +1,119 @@
 /*
-  ESP8266 RGB Controller  v3.3.0
+  ESP8266 RGB Controller  v3.4.0
 
   Wi-Fi controller for a WS2812B LED lamp on a Wemos D1 Mini (ESP8266).
-  Control it from the built-in web page or through Adafruit IO (MQTT).
+  Control it from its own web page or through Adafruit IO (MQTT).
 
   Copyright (c) 2019-2026 G Cinini
   SPDX-License-Identifier: MIT
   See LICENSE, and THIRD_PARTY_NOTICES.md for the libraries this sketch uses.
 
-  Design
-  ------
-  Everything that changes the lamp (web requests, MQTT messages) only updates the
-  `lamp` state below and returns. loop() then draws one animation frame from that
-  state. Settings are written to flash a couple of seconds after the last change,
-  so dragging the brightness slider does not wear out the flash.
+  ==========================================================================
+  HOW TO READ THIS FILE
+  ==========================================================================
+  Arduino sketches are written in C++, a bigger language built on top of C.
+  Most of this file is plain C (variables, functions, if/for/switch, structs);
+  where it uses something that is C++ only (classes such as String, lambdas,
+  references) the comment says so.
+
+  Every Arduino program has two special functions:
+    setup()  runs once, when the board powers up or resets
+    loop()   runs over and over, forever, after setup() finishes
+
+  The sketch is organised in this order - you can read it top to bottom:
+    1. Libraries and settings            (#include lines, config.h)
+    2. Lamp state                         (the variables that describe the lamp)
+    3. setup() and loop()
+    4. Lamp control                       (functions that change the state)
+    5. Colours                            (turning "Hot Pink" or "#FF8800" into RGB)
+    6. Drawing                            (turning the state into LED colours)
+    7. Saving settings                    (so the lamp remembers after a power cut)
+    8. Wi-Fi, OTA and Adafruit IO         (networking)
+    9. Web interface                      (the web page and its small API)
+
+  THE BIG IDEA
+  ------------
+  A microcontroller can only do one thing at a time. If the code waited
+  (with delay()) for an animation to finish, the lamp could not answer the
+  web page or Adafruit IO in the meantime.
+
+  So nothing here ever waits for long. Instead:
+    * web requests and MQTT messages only CHANGE THE STATE (the `lamp`
+      variable) and return straight away;
+    * loop() then draws ONE animation frame from that state, and comes back
+      around a few microseconds later to check the network again.
+  This is called "non-blocking" code, and it is the most important pattern in
+  embedded programming.
+
+  WHERE THE SETTINGS ARE
+  ----------------------
+    config.h    LED count, pin, device name, feed group... (one block per lamp)
+    secrets.h   Wi-Fi and Adafruit IO passwords (not on GitHub)
 */
 
-#include <ESP8266WiFi.h>
-#include <WiFiClientSecure.h>
-#include <ESP8266WebServer.h>
-#include <ArduinoOTA.h>
-#include <EEPROM.h>
-#include <PubSubClient.h>
-#include <time.h>
 
-#define FASTLED_ESP8266_RAW_PIN_ORDER   // must come before FastLED.h
-#include <FastLED.h>
+// ===========================================================================
+// 1. Libraries and settings
+// ===========================================================================
+// #include copies another file into this one before compiling. Files in
+// <angle brackets> come from installed libraries; files in "quotes" are in
+// this sketch's own folder.
 
-#include "web_page.h"
-#include "mqtt_roots.h"
+#include <ESP8266WiFi.h>        // joining a Wi-Fi network
+#include <WiFiClientSecure.h>   // encrypted (TLS) network connections
+#include <ESP8266WebServer.h>   // serving the web page
+#include <ArduinoOTA.h>         // receiving firmware updates over Wi-Fi
+#include <EEPROM.h>             // saving settings so they survive a power cut
+#include <PubSubClient.h>       // MQTT, the messaging protocol Adafruit IO uses
+#include <time.h>               // the clock (needed to check certificate dates)
 
-// Wi-Fi and Adafruit IO credentials live in secrets.h, which git ignores.
+// FastLED needs this setting *before* it is included: it makes pin names like
+// D4 mean the same thing to FastLED as they do to the rest of the sketch.
+#define FASTLED_ESP8266_RAW_PIN_ORDER
+#include <FastLED.h>            // driving the LED strip
+
+// secrets.h is included before config.h, so secrets.h can override settings
+// such as MQTT_USE_TLS. __has_include checks whether the file exists, so a
+// missing secrets.h gives a clear message instead of a confusing error.
 #if __has_include("secrets.h")
 #include "secrets.h"
 #else
 #error "secrets.h not found: copy secrets.example.h to secrets.h and fill in your credentials"
 #endif
 
+#include "config.h"             // this lamp's settings
+#include "web_page.h"           // the web page (HTML, CSS and JavaScript as one text)
+#include "mqtt_roots.h"         // certificates trusted for the encrypted connection
 
-// ===========================================================================
-// Configuration
-// ===========================================================================
-#define LED_PIN    D4         // data line to the strip
-#define LED_COUNT  35         // number of LEDs on the strip
-#define LED_TYPE   WS2812B
-#define LED_ORDER  GRB
+// A `const` variable can't be changed after it is created. The compiler
+// stops you if you try. `const char *` is a pointer to text: in C, text is
+// stored as a row of characters, and the variable holds where it starts.
+const char *FIRMWARE_VERSION = "3.4.0";
 
-const char    *FIRMWARE_VERSION = "3.3.0";
-const char    *DEVICE_NAME     = "ESP-lightbox1";   // network / OTA name
-const uint32_t FRAME_INTERVAL  = 20;            // ms per animation frame (50 fps)
-const uint32_t MQTT_RETRY_MS   = 5000;          // wait between MQTT reconnect attempts
-const uint32_t SAVE_DELAY_MS   = 2000;          // write settings this long after the last change
-const uint32_t RANDOM_HOLD_MS  = 8000;          // how long Random mode keeps each palette
-const float    COLOUR_GAMMA    = 2.6f;          // makes picked colours look right on LEDs
-
-// Candle mode lights only the bottom of the lamp, like a tea light in a jar.
-const uint8_t  CANDLE_LEDS       = 14;          // how many LEDs form the flame
-const bool     CANDLE_AT_LED_ZERO = true;       // true if LED 0 is at the bottom of the lamp
-
-// Status reports to Adafruit IO (feed espweb.outtopic). The free plan allows
-// 30 messages a minute, so reports are grouped and spaced out.
-const uint32_t STATUS_SETTLE_MS   = 1500;       // wait for changes to settle before reporting
-const uint32_t STATUS_MIN_GAP_MS  = 5000;       // never report more often than this
-const uint32_t STATUS_HEARTBEAT_MS = 600000;    // report every 10 minutes even without changes
-
-// Adafruit IO connection. With MQTT_USE_TLS on (the default), the connection is
-// encrypted and the server's certificate is checked against the root
-// certificates in mqtt_roots.h. Add `#define MQTT_USE_TLS 0` to secrets.h to fall
-// back to the unencrypted port 1883 (your Adafruit IO key is then sent in clear).
-#ifndef MQTT_USE_TLS
-#define MQTT_USE_TLS 1
-#endif
-
-const char *MQTT_HOST = "io.adafruit.com";
 #if MQTT_USE_TLS
-const uint16_t MQTT_PORT = 8883;
+const uint16_t MQTT_PORT = 8883;   // encrypted MQTT
 #else
-const uint16_t MQTT_PORT = 1883;
+const uint16_t MQTT_PORT = 1883;   // unencrypted MQTT
 #endif
 
-// Certificates can only be checked with the correct date, so the lamp sets its
-// clock from these NTP servers before connecting.
-const char *NTP_SERVER_1 = "pool.ntp.org";
-const char *NTP_SERVER_2 = "time.google.com";
-const time_t CLOCK_VALID_AFTER = 1704067200;   // 2024-01-01: anything earlier means "not set yet"
+// A clock reading earlier than this means "not set yet" (the ESP8266 starts
+// counting from 1 January 1970). 1704067200 seconds = 1 January 2024.
+const time_t CLOCK_VALID_AFTER = 1704067200;
 
 
 // ===========================================================================
-// Lamp state
+// 2. Lamp state
 // ===========================================================================
-// Mode numbers are used by the web API and stored in flash.
+// Integer types used throughout:
+//   uint8_t   whole number 0-255           (u = unsigned = never negative, 8 bits)
+//   uint16_t  whole number 0-65535         (16 bits)
+//   uint32_t  whole number 0-4294967295    (32 bits)
+// Using the smallest type that fits saves memory, which matters on a chip
+// with about 80 KB of RAM.
+
+// --- Modes -----------------------------------------------------------------
+// Each mode has a number. The web page sends these numbers (/mode?id=3) and
+// they are what gets saved in flash, so don't renumber them.
 const uint8_t MODE_SOLID           = 1;   // one colour
 const uint8_t MODE_FADE            = 2;   // whole lamp slowly drifts through colours
 const uint8_t MODE_RAINBOW         = 3;   // rainbow moving along the strip
@@ -100,11 +124,15 @@ const uint8_t MODE_CANDLE          = 7;   // flickering candle at the bottom of 
 const uint8_t MODE_MIN = MODE_SOLID;
 const uint8_t MODE_MAX = MODE_CANDLE;
 
-// Display names (index = mode number) and the words MQTT accepts for each mode.
+// An array is a numbered list. MODE_NAMES[3] is "Rainbow". Index 0 is
+// unused, so the index matches the mode number. `const char *const` means
+// neither the list nor the text in it can be changed.
 const char *const MODE_NAMES[] = {
   "", "Solid colour", "Colour fade", "Rainbow", "Random", "Palette, smooth", "Palette, stepped", "Candle"
 };
 
+// A struct groups several values into one new type, like a row in a table.
+// This one pairs a word that Adafruit IO can send with the mode it selects.
 struct ModeWord {
   const char *word;
   uint8_t mode;
@@ -115,12 +143,15 @@ const ModeWord MODE_WORDS[] = {
   { "stepped", MODE_PALETTE_STEPPED },                            { "candle", MODE_CANDLE },
 };
 
+// --- Palettes -----------------------------------------------------------------
+// A palette is a list of 16 colours that FastLED blends between. CloudColors_p
+// and friends are built into FastLED. The `&` takes the *address* of each
+// palette, so the table stores where the palette is rather than a copy of it.
 struct NamedPalette {
   const char *name;
-  const TProgmemRGBPalette16 *colours;
+  const TProgmemRGBPalette16 *colours;   // `*` = pointer to (address of) a palette
 };
 
-// Palettes offered on the web page (index = palette id).
 const NamedPalette PALETTES[] = {
   { "Cloud",  &CloudColors_p  },
   { "Ocean",  &OceanColors_p  },
@@ -129,51 +160,64 @@ const NamedPalette PALETTES[] = {
   { "Forest", &ForestColors_p },
   { "Lava",   &LavaColors_p   },
 };
+// sizeof gives a size in bytes. Total size divided by the size of one entry
+// = number of entries, so this stays right if you add or remove a palette.
 const uint8_t PALETTE_COUNT = sizeof(PALETTES) / sizeof(PALETTES[0]);
 
+// --- The lamp itself ----------------------------------------------------------
+// Everything that describes what the lamp is showing, in one struct.
+// CRGB is FastLED's colour type: three uint8_t values named r, g and b.
 struct Lamp {
-  bool    on;
-  uint8_t mode;
-  uint8_t palette;
-  CRGB    colour;       // as picked (gamma is applied when drawing)
+  bool    on;           // true or false
+  uint8_t mode;         // one of the MODE_ numbers
+  uint8_t palette;      // index into PALETTES
+  CRGB    colour;       // the colour as picked (gamma is applied when drawing)
   uint8_t brightness;   // 1-255, applied through FastLED.setBrightness()
 };
 
-Lamp lamp = { true, MODE_SOLID, 0, CRGB(255, 180, 107), 128 };   // warm white, half brightness
+// The one and only lamp, with its starting values (from config.h).
+Lamp lamp = { true, MODE_SOLID, 0, CRGB(DEFAULT_RED, DEFAULT_GREEN, DEFAULT_BLUE), DEFAULT_BRIGHTNESS };
 
 
-// ===========================================================================
-// Globals
-// ===========================================================================
-CRGB          leds[LED_COUNT];
-CRGBPalette16 activePalette;
-TBlendType    activeBlend = LINEARBLEND;
-CRGB          solidColour;            // lamp.colour after gamma correction
-uint8_t       animationPhase = 0;
+// --- Other global variables -----------------------------------------------------
+// "Global" means declared outside any function, so every function can use it.
+CRGB          leds[LED_COUNT];        // one colour per LED; FastLED sends this array to the strip
+CRGBPalette16 activePalette;          // the palette the current mode is drawing with
+TBlendType    activeBlend = LINEARBLEND;   // LINEARBLEND = smooth, NOBLEND = hard steps
+CRGB          solidColour;            // lamp.colour after gamma correction (see lampChanged)
+uint8_t       animationPhase = 0;     // how far an animation has moved; wraps 255 -> 0 by itself
 
-ESP8266WebServer web(80);
+// These are *objects*, a C++ idea: a variable that carries its own functions
+// (called methods), used like web.send(...) or mqtt.connect(...).
+ESP8266WebServer web(80);             // web server on port 80, the normal HTTP port
 #if MQTT_USE_TLS
-BearSSL::WiFiClientSecure mqttSocket;
-BearSSL::X509List         mqttTrustedRoots(MQTT_ROOT_CERTS);
+BearSSL::WiFiClientSecure mqttSocket;                     // encrypted network connection
+BearSSL::X509List         mqttTrustedRoots(MQTT_ROOT_CERTS);  // certificates we trust
 #else
-WiFiClient                mqttSocket;
+WiFiClient                mqttSocket;                     // plain network connection
 #endif
-PubSubClient     mqtt(mqttSocket);
+PubSubClient     mqtt(mqttSocket);    // MQTT client that talks over mqttSocket
 
-// Adafruit IO feed topics, built from MQTT_USER in setup()
+// Adafruit IO "topics" - the addresses of the feeds - built in setup().
+// String is a C++ class for text that can grow; it is easier than C text but
+// uses more memory, so this sketch uses it only where it helps.
 String topicPower, topicColour, topicBrightness, topicButton, topicStatus;
 
-bool     savePending = false;
-uint32_t lastChangeAt = 0;
-
-bool     statusPending = true;    // send a report as soon as Adafruit IO connects
-uint32_t lastStatusAt = 0;
+// Bookkeeping for the delayed jobs (saving, status reports).
+bool     savePending = false;     // true = settings changed and need saving
+uint32_t lastChangeAt = 0;        // millis() when the lamp last changed
+bool     statusPending = true;    // true = Adafruit IO should get a status report
+uint32_t lastStatusAt = 0;        // millis() of the last report (0 = never)
 
 
 // ===========================================================================
-// Function declarations
+// Function declarations ("prototypes")
 // ===========================================================================
-// Lamp control (shared by the web page and MQTT)
+// In C, a function must be declared before it is used. These lines tell the
+// compiler each function's name, inputs and result, so the functions can be
+// written in any order below. `void` means "returns nothing".
+
+// Lamp control (used by both the web page and Adafruit IO)
 void setPower(bool on);
 void setMode(uint8_t mode);
 void setPalette(uint8_t id);
@@ -189,7 +233,7 @@ void drawPaletteAlongStrip();
 void drawCandle();
 void pickRandomPalette();
 
-// Status
+// Status reports
 String statusText();
 String uptimeText();
 void publishStatusIfDue();
@@ -214,66 +258,85 @@ String stateAsJson();
 
 
 // ===========================================================================
-// ========     setup() and loop()                                     =======
+// 3. setup() and loop()
 // ===========================================================================
 void setup() {
+  // The serial port sends text back to your computer over USB. Open the
+  // serial monitor at 115200 baud to see these messages.
   Serial.begin(115200);
   Serial.println();
-  Serial.printf("ESP8266 RGB Controller v%s\n", FIRMWARE_VERSION);
+  Serial.printf("ESP8266 RGB Controller v%s - lamp %d (%s)\n", FIRMWARE_VERSION, LAMP_ID, DEVICE_NAME);
 
+  // Tell FastLED what kind of strip we have and where it is. The values in
+  // <angle brackets> are template parameters (a C++ feature): they must be
+  // known when compiling, which is why they come from #define in config.h.
   FastLED.addLeds<LED_TYPE, LED_PIN, LED_ORDER>(leds, LED_COUNT).setCorrection(TypicalLEDStrip);
-  FastLED.setDither(1);
+  FastLED.setDither(1);   // smoother colours at low brightness
+  if (MAX_MILLIAMPS > 0) {
+    FastLED.setMaxPowerInVoltsAndMilliamps(5, MAX_MILLIAMPS);   // stay within the power supply's limit
+  }
 
-  loadSettings();         // restore the last state so the lamp lights up immediately
-  connectWiFi();          // keeps animating while it waits
-  configTime(0, 0, NTP_SERVER_1, NTP_SERVER_2);   // UTC; the clock is only used for certificate checks
+  loadSettings();   // restore the last state, so the lamp lights up straight away
+  connectWiFi();    // waits for Wi-Fi, but keeps animating while it waits
+  configTime(0, 0, NTP_SERVER_1, NTP_SERVER_2);   // start setting the clock (UTC) in the background
   startOta();
   startWebServer();
 
-  topicPower      = String(MQTT_USER) + "/feeds/espweb.onoff";
-  topicColour     = String(MQTT_USER) + "/feeds/espweb.color";
-  topicBrightness = String(MQTT_USER) + "/feeds/espweb.brightness";
-  topicButton     = String(MQTT_USER) + "/feeds/espweb.button";
-  topicStatus     = String(MQTT_USER) + "/feeds/espweb.outtopic";
+  // Build the Adafruit IO feed addresses, e.g. "gcinini/feeds/espweb.onoff".
+  // Adding Strings with + joins them together.
+  String feeds = String(MQTT_USER) + "/feeds/" + FEED_GROUP;
+  topicPower      = feeds + ".onoff";
+  topicColour     = feeds + ".color";
+  topicBrightness = feeds + ".brightness";
+  topicButton     = feeds + ".button";
+  topicStatus     = feeds + ".outtopic";
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
-  mqtt.setCallback(onMqttMessage);
-  mqtt.setBufferSize(512);   // room for the status report (the default is 256 bytes)
+  mqtt.setCallback(onMqttMessage);   // "call onMqttMessage() whenever a message arrives"
+  mqtt.setBufferSize(512);           // room for the status report (the default is 256 bytes)
 }
 
+// Each of these returns almost immediately. That's what keeps the lamp
+// responsive: loop() runs many thousands of times a second.
 void loop() {
-  ArduinoOTA.handle();
-  web.handleClient();
-  serviceMqtt();
-  drawFrame();
-  saveSettingsIfDue();
-  publishStatusIfDue();
+  ArduinoOTA.handle();     // is someone sending a firmware update?
+  web.handleClient();      // has the web page sent a request?
+  serviceMqtt();           // any Adafruit IO messages? reconnect if needed
+  drawFrame();             // draw the next animation frame, if it's time
+  saveSettingsIfDue();     // save settings, if it's time
+  publishStatusIfDue();    // send a status report, if it's time
 }
 
 
 // ===========================================================================
-// Lamp control
+// 4. Lamp control
 // ===========================================================================
+// Every change to the lamp goes through one of these functions, whether it
+// came from the web page or from Adafruit IO. Each one updates `lamp`, prints
+// a line to the serial monitor, and calls lampChanged().
+
 void setPower(bool on) {
   lamp.on = on;
+  // `condition ? a : b` is the ternary operator: a if true, b if false.
   Serial.println(on ? "Lamp on" : "Lamp off");
   lampChanged();
 }
 
 void setMode(uint8_t mode) {
-  if (mode < MODE_MIN || mode > MODE_MAX) return;
+  if (mode < MODE_MIN || mode > MODE_MAX) return;   // || means "or"; ignore unknown modes
   lamp.mode = mode;
   lamp.on = true;
-  Serial.printf("Mode %s\n", MODE_NAMES[mode]);
+  Serial.printf("Mode %s\n", MODE_NAMES[mode]);   // %s in printf is replaced by text
   lampChanged();
 }
 
 void setPalette(uint8_t id) {
   if (id >= PALETTE_COUNT) return;
   lamp.palette = id;
-  // Show the palette straight away, keeping "stepped" if that is what was showing
+  // Show the palette straight away. != means "is not equal to".
+  // If "stepped" is already showing, keep it; otherwise use "smooth".
   if (lamp.mode != MODE_PALETTE_STEPPED) lamp.mode = MODE_PALETTE_SMOOTH;
   lamp.on = true;
-  Serial.printf("Palette %s\n", PALETTES[id].name);
+  Serial.printf("Palette %s\n", PALETTES[id].name);   // . reads a field of a struct
   lampChanged();
 }
 
@@ -281,29 +344,40 @@ void setColour(CRGB colour) {
   lamp.colour = colour;
   lamp.mode = MODE_SOLID;
   lamp.on = true;
+  // %02X prints a number as 2 hexadecimal digits, so 255 becomes FF.
   Serial.printf("Colour #%02X%02X%02X\n", colour.r, colour.g, colour.b);
   lampChanged();
 }
 
 void setBrightness(uint8_t level) {
-  lamp.brightness = (level == 0) ? 1 : level;
-  Serial.printf("Brightness %u\n", lamp.brightness);
+  lamp.brightness = (level == 0) ? 1 : level;   // never 0, so "on" always shows something
+  Serial.printf("Brightness %u\n", lamp.brightness);   // %u = unsigned whole number
   lampChanged();
 }
 
-// Applies the new state to the LEDs and schedules a save.
+// Called after every change: applies it and schedules the delayed jobs.
 void lampChanged() {
   FastLED.setBrightness(lamp.brightness);
+
+  // Gamma correction. Our eyes don't see brightness in a straight line: an
+  // LED at half power looks much brighter than "half". applyGamma_video()
+  // bends the numbers so colours picked on a screen look right on the LEDs.
   solidColour = CRGB(applyGamma_video(lamp.colour.r, COLOUR_GAMMA),
                      applyGamma_video(lamp.colour.g, COLOUR_GAMMA),
                      applyGamma_video(lamp.colour.b, COLOUR_GAMMA));
   preparePalette();
+
+  // Don't save or report right now. Just note that it needs doing; loop()
+  // does it a moment later (see saveSettingsIfDue and publishStatusIfDue).
   savePending = true;
   statusPending = true;
-  lastChangeAt = millis();
+  lastChangeAt = millis();   // millis() = milliseconds since the board started
 }
 
 // Loads the palette and blending the current mode draws with.
+// switch picks one `case` by value. `break` jumps to the end of the switch;
+// without it, the code would carry on into the next case. Two case labels
+// in a row (5 and 6 below) share the same code.
 void preparePalette() {
   switch (lamp.mode) {
     case MODE_FADE:
@@ -319,17 +393,18 @@ void preparePalette() {
       break;
     case MODE_PALETTE_SMOOTH:
     case MODE_PALETTE_STEPPED:
+      // *pointer means "the thing the pointer points to": the palette itself.
       activePalette = *PALETTES[lamp.palette].colours;
       activeBlend = (lamp.mode == MODE_PALETTE_SMOOTH) ? LINEARBLEND : NOBLEND;
       break;
     default:
-      break;
+      break;   // solid colour and candle don't use a palette
   }
 }
 
 
 // ===========================================================================
-// Colour names and hex values
+// 5. Colours: names and hex values
 // ===========================================================================
 struct NamedColour {
   const char *name;     // lower case, no spaces
@@ -350,22 +425,36 @@ const NamedColour COLOUR_NAMES[] = {
   { "purple", 128, 0, 128 },     { "indigo", 75, 0, 130 },       { "silver", 192, 192, 192 },
 };
 
-// Understands colour names ("Hot Pink", "royalblue") and hex ("#FF8800" or "ff8800").
+// Turns text into a colour. Understands names ("Hot Pink", "royalblue") and
+// hex ("#FF8800" or "ff8800"). Returns true if it understood the text.
+//
+// `CRGB &out` is a *reference* (C++): the function writes straight into the
+// caller's variable, which is how it can hand back a colour as well as
+// returning true/false.
 bool colourFromText(String text, CRGB &out) {
-  text.trim();
+  text.trim();             // remove spaces at the start and end
   text.toLowerCase();
-  text.replace(" ", "");
+  text.replace(" ", "");   // "Hot Pink" -> "hotpink"
+
+  // "for each colour c in COLOUR_NAMES" (a C++ range-based for loop)
   for (const NamedColour &c : COLOUR_NAMES) {
     if (text == c.name) {
       out = CRGB(c.r, c.g, c.b);
-      return true;
+      return true;          // found it: stop here
     }
   }
-  if (text.startsWith("#")) text.remove(0, 1);
+
+  // Not a name, so try hex: exactly 6 characters, each 0-9 or a-f.
+  if (text.startsWith("#")) text.remove(0, 1);   // drop a leading #
   if (text.length() != 6) return false;
-  for (unsigned int i = 0; i < text.length(); i++) {
-    if (!isxdigit(text[i])) return false;
+  for (unsigned int i = 0; i < text.length(); i++) {   // i = 0, 1, 2 ... 5
+    if (!isxdigit(text[i])) return false;               // ! means "not"
   }
+
+  // strtoul turns the text into one number, e.g. "ff8800" -> 0xFF8800.
+  // Then pick out each colour's 8 bits:
+  //   >> 16  shifts the number right by 16 bits, leaving the red part at the bottom
+  //   & 0xFF keeps only the lowest 8 bits (0-255)
   uint32_t value = strtoul(text.c_str(), nullptr, 16);
   out = CRGB((value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF);
   return true;
@@ -373,21 +462,29 @@ bool colourFromText(String text, CRGB &out) {
 
 
 // ===========================================================================
-// Drawing - one frame per call, at most every FRAME_INTERVAL ms
+// 6. Drawing - one frame per call, at most every FRAME_INTERVAL_MS
 // ===========================================================================
+// A `static` variable inside a function keeps its value between calls
+// (normal local variables start fresh every time). That's how drawFrame()
+// remembers when it last drew a frame.
 void drawFrame() {
   static uint32_t lastFrameAt = 0;
   static uint32_t frameNumber = 0;
   static uint32_t randomSince = 0;
 
+  // The non-blocking timer: "has FRAME_INTERVAL_MS passed since the last
+  // frame?" If not, return immediately and let loop() do other work.
+  // Writing it as `now - lastFrameAt` (not `now > lastFrameAt + interval`)
+  // keeps it correct even when millis() rolls over to 0 after 49.7 days,
+  // because unsigned subtraction wraps around too.
   uint32_t now = millis();
-  if (now - lastFrameAt < FRAME_INTERVAL) return;
+  if (now - lastFrameAt < FRAME_INTERVAL_MS) return;
   lastFrameAt = now;
-  frameNumber++;
+  frameNumber++;   // ++ adds 1
 
   if (!lamp.on) {
-    FastLED.clear();
-    FastLED.show();
+    FastLED.clear();   // all LEDs black...
+    FastLED.show();    // ...and send that to the strip
     return;
   }
 
@@ -397,13 +494,15 @@ void drawFrame() {
       break;
 
     case MODE_FADE:
-      // One colour for the whole lamp, moving one palette step every 4 frames (~20 s per cycle)
+      // One colour for the whole lamp, moving one palette step every 4 frames
+      // (about 20 s per cycle). % is the remainder after dividing, so
+      // frameNumber % 4 == 0 is true on every 4th frame.
       if (frameNumber % 4 == 0) animationPhase++;
       fill_solid(leds, LED_COUNT, ColorFromPalette(activePalette, animationPhase, 255, activeBlend));
       break;
 
     case MODE_RANDOM:
-      if (now - randomSince >= RANDOM_HOLD_MS) {
+      if (now - randomSince >= RANDOM_HOLD_MS) {   // time for a new palette?
         randomSince = now;
         pickRandomPalette();
       }
@@ -420,48 +519,63 @@ void drawFrame() {
       drawPaletteAlongStrip();
       break;
   }
-  FastLED.show();
+  FastLED.show();   // nothing appears on the strip until show() sends the leds[] array
 }
 
 // Spreads the active palette along the strip, shifted by the animation phase.
+// Because animationPhase grows by 1 every frame, the colours appear to move.
 void drawPaletteAlongStrip() {
   const uint8_t spacing = 4;   // palette steps between neighbouring LEDs
   for (uint16_t i = 0; i < LED_COUNT; i++) {
+    // ColorFromPalette(palette, position 0-255, brightness, blending).
+    // Positions above 255 wrap round, because they're stored in a uint8_t.
     leds[i] = ColorFromPalette(activePalette, animationPhase + i * spacing, 255, activeBlend);
   }
 }
 
-// Candle mode: a warm flame at the bottom of the lamp, brightest at its base and
-// dimmer and redder towards the tip. Slow noise makes the whole flame breathe,
-// faster noise makes each LED shimmer, and now and then a "draught" makes it dip.
+// Candle mode: a warm flame at the bottom of the lamp, brightest at its base
+// and dimmer and redder towards the tip.
+//   * slow noise makes the whole flame "breathe"
+//   * faster noise makes each LED shimmer on its own
+//   * now and then a "draught" makes the flame dip and recover
+// inoise8() is FastLED's Perlin noise: it returns 0-255 values that change
+// smoothly rather than jumping about like random numbers, which is why the
+// flicker looks natural.
 void drawCandle() {
   static uint16_t noiseClock = 0;
   static uint8_t draught = 0;          // how far the flame is currently dipping
 
-  noiseClock += 7;
+  noiseClock += 7;                     // += adds to the variable: noiseClock = noiseClock + 7
   if (draught > 0) {
     draught = qsub8(draught, 5);       // recover over a few hundred milliseconds
-  } else if (random8() == 0) {         // about once every 5 seconds at 50 fps
+  } else if (random8() == 0) {         // random8() is 0-255, so 1 frame in 256: about every 5 s
     draught = random8(60, 130);
   }
 
+  // qadd8 / qsub8 / scale8 are FastLED's safe 8-bit maths: qadd8 stops at 255
+  // instead of wrapping round to 0, qsub8 stops at 0, and scale8(a, b) means
+  // "a times b/256" - a quick way to take a fraction of a value.
   uint8_t flame = qadd8(150, scale8(inoise8(noiseClock), 105));   // overall level 150-255
   flame = qsub8(flame, draught);
 
   const CRGB base(255, 147, 41);       // the yellow-orange of a candle flame
   const CRGB tip(255, 64, 6);          // deeper orange at the top of the flame
 
-  FastLED.clear();
+  FastLED.clear();                     // LEDs above the flame stay dark
+  // && means "and": stop at CANDLE_LEDS, but never go past the end of the strip.
   for (uint8_t i = 0; i < CANDLE_LEDS && i < LED_COUNT; i++) {
-    uint8_t height = (CANDLE_LEDS > 1) ? (uint16_t)i * 255 / (CANDLE_LEDS - 1) : 0;   // 0 = base, 255 = tip
+    // height: 0 at the base of the flame, 255 at its tip. The (uint16_t)
+    // "cast" converts i to a bigger type first, so i * 255 can't overflow.
+    uint8_t height = (CANDLE_LEDS > 1) ? (uint16_t)i * 255 / (CANDLE_LEDS - 1) : 0;
     uint8_t shimmer = inoise8((uint16_t)i * 50, noiseClock * 3);
 
-    uint8_t level = scale8(flame, 255 - scale8(height, 180));       // fade out towards the tip
-    level = scale8(level, 190 + scale8(shimmer, 65));               // per-LED shimmer
+    uint8_t level = scale8(flame, 255 - scale8(height, 180));   // fade out towards the tip
+    level = scale8(level, 190 + scale8(shimmer, 65));           // per-LED shimmer
 
-    CRGB colour = blend(base, tip, height);
-    colour.nscale8_video(level);
+    CRGB colour = blend(base, tip, height);   // mix base and tip colours by height
+    colour.nscale8_video(level);              // dim to the level, never fully off
 
+    // Count from the start or the end of the strip, depending on how it is mounted.
     uint8_t index = CANDLE_AT_LED_ZERO ? i : (LED_COUNT - 1 - i);
     leds[index] = colour;
   }
@@ -476,7 +590,9 @@ void pickRandomPalette() {
   };
   const uint8_t choiceCount = sizeof(choices) / sizeof(choices[0]);
 
-  if (random8(4) == 0) {
+  if (random8(4) == 0) {   // random8(4) is 0, 1, 2 or 3: a 1-in-4 chance
+    // CHSV describes a colour by hue (0-255 around the colour wheel),
+    // saturation and value (brightness). Spacing the hues out makes a gradient.
     uint8_t hue = random8();
     activePalette = CRGBPalette16(CHSV(hue, 255, 255),
                                   CHSV(hue + 64 + random8(64), 255, 255),
@@ -490,9 +606,17 @@ void pickRandomPalette() {
 
 
 // ===========================================================================
-// Settings in flash (EEPROM emulation)
+// 7. Saving settings in flash
 // ===========================================================================
-const uint8_t SETTINGS_MARKER = 0xC1;   // changes whenever the layout below changes
+// The ESP8266 has no real EEPROM chip; the EEPROM library uses a small piece
+// of flash memory instead. Flash wears out after roughly 10,000-100,000
+// writes, so the sketch saves only when something changed, and waits until
+// SAVE_DELAY_MS after the last change (dragging the brightness slider would
+// otherwise write dozens of times).
+
+// Change this number whenever StoredSettings changes, so old saved data in
+// the wrong format is ignored instead of being misread.
+const uint8_t SETTINGS_MARKER = 0xC1;   // 0x means hexadecimal: 0xC1 = 193
 
 struct StoredSettings {
   uint8_t marker;
@@ -501,10 +625,11 @@ struct StoredSettings {
 };
 
 void loadSettings() {
-  EEPROM.begin(sizeof(StoredSettings));
-  StoredSettings s = {};
-  EEPROM.get(0, s);
+  EEPROM.begin(sizeof(StoredSettings));   // reserve exactly as many bytes as we store
+  StoredSettings s = {};                  // = {} starts every field at 0
+  EEPROM.get(0, s);                       // copy the saved bytes into s
   if (s.marker == SETTINGS_MARKER) {
+    // Only accept values that make sense; a garbled byte keeps the default.
     if (s.mode >= MODE_MIN && s.mode <= MODE_MAX) lamp.mode = s.mode;
     if (s.palette < PALETTE_COUNT) lamp.palette = s.palette;
     if (s.brightness > 0) lamp.brightness = s.brightness;
@@ -526,27 +651,30 @@ void saveSettingsIfDue() {
                             lamp.colour.r, lamp.colour.g, lamp.colour.b };
   StoredSettings current = {};
   EEPROM.get(0, current);
-  if (memcmp(&wanted, &current, sizeof(StoredSettings)) == 0) return;   // unchanged, skip the flash write
+  // memcmp compares two blocks of memory byte by byte; 0 means identical.
+  if (memcmp(&wanted, &current, sizeof(StoredSettings)) == 0) return;   // unchanged: skip the write
 
   EEPROM.put(0, wanted);
-  EEPROM.commit();
+  EEPROM.commit();   // actually writes to flash
   Serial.println("Settings saved");
 }
 
 
 // ===========================================================================
-// Wi-Fi, OTA and MQTT
+// 8. Wi-Fi, OTA and Adafruit IO
 // ===========================================================================
 void connectWiFi() {
-  WiFi.mode(WIFI_STA);
+  WiFi.mode(WIFI_STA);          // STA = "station": join a network (not create one)
   WiFi.hostname(DEVICE_NAME);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.printf("Joining Wi-Fi \"%s\"", WIFI_SSID);
+  Serial.printf("Joining Wi-Fi \"%s\"", WIFI_SSID);   // \" puts a quote mark inside text
 
+  // This is the one place the sketch waits, because nothing else can work
+  // without Wi-Fi. It still draws frames while waiting.
   uint32_t lastDot = millis();
-  while (WiFi.status() != WL_CONNECTED) {
-    drawFrame();   // keep the lamp animating while we wait
-    delay(5);
+  while (WiFi.status() != WL_CONNECTED) {   // while = repeat as long as the condition is true
+    drawFrame();
+    delay(5);                   // short pause; also lets the Wi-Fi system do its work
     if (millis() - lastDot >= 500) {
       lastDot = millis();
       Serial.print('.');
@@ -556,11 +684,14 @@ void connectWiFi() {
                 WiFi.localIP().toString().c_str(), DEVICE_NAME);
 }
 
+// OTA = "over the air": PlatformIO can send new firmware over Wi-Fi.
 void startOta() {
   ArduinoOTA.setHostname(DEVICE_NAME);
 #ifdef OTA_PASSWORD
-  ArduinoOTA.setPassword(OTA_PASSWORD);   // optional, set in secrets.h
+  ArduinoOTA.setPassword(OTA_PASSWORD);   // only if secrets.h defines one
 #endif
+  // The []() { ... } blocks are *lambdas* (C++): small unnamed functions
+  // written right where they're needed. ArduinoOTA calls them at each stage.
   ArduinoOTA.onStart([]() {
     Serial.println("OTA update starting");
     FastLED.clear(true);   // LEDs off while flashing
@@ -571,6 +702,7 @@ void startOta() {
 }
 
 bool clockIsSet() {
+  // time(nullptr) returns the current time in seconds since 1 January 1970.
   return time(nullptr) > CLOCK_VALID_AFTER;
 }
 
@@ -583,6 +715,8 @@ void prepareMqttSocket() {
   prepared = true;
 
   mqttSocket.setTrustAnchors(&mqttTrustedRoots);
+  // :: reaches inside a class. probeMaxFragmentLength asks the server whether
+  // it accepts small 1 KB message pieces instead of the standard 16 KB.
   if (BearSSL::WiFiClientSecure::probeMaxFragmentLength(MQTT_HOST, MQTT_PORT, 1024)) {
     mqttSocket.setBufferSizes(1024, 1024);
     Serial.println("Adafruit IO: server supports small TLS buffers (1 KB)");
@@ -594,11 +728,11 @@ void prepareMqttSocket() {
 
 // Keeps the Adafruit IO connection alive. When it is down, reconnect attempts
 // start every MQTT_RETRY_MS and back off to once a minute if they keep failing
-// (an encrypted attempt pauses the lamp for a second or two). The lamp and the
-// web page keep working in between.
+// (each encrypted attempt pauses the lamp for a second or two). The lamp and
+// the web page keep working in between.
 void serviceMqtt() {
   if (mqtt.connected()) {
-    mqtt.loop();
+    mqtt.loop();   // receive messages (which calls onMqttMessage) and keep the connection alive
     return;
   }
 
@@ -617,14 +751,16 @@ void serviceMqtt() {
   if (waitingForClock) Serial.println("Adafruit IO: clock set");
   waitingForClock = false;
   prepareMqttSocket();
-  mqttSocket.setX509Time(time(nullptr));
+  mqttSocket.setX509Time(time(nullptr));   // tell the certificate checker today's date
 #endif
 
   lastAttemptAt = millis();
+  // The client ID must be unique on Adafruit IO, so add the chip's serial number.
   String clientId = String(DEVICE_NAME) + "-" + String(ESP.getChipId(), HEX);
   Serial.printf("Adafruit IO: connecting to %s:%u%s... ", MQTT_HOST, MQTT_PORT, MQTT_USE_TLS ? " (TLS)" : "");
   if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_KEY)) {
     Serial.printf("connected (free memory %u bytes)\n", ESP.getFreeHeap());
+    // .c_str() turns a String into plain C text, which the library expects.
     mqtt.subscribe(topicPower.c_str());
     mqtt.subscribe(topicColour.c_str());
     mqtt.subscribe(topicBrightness.c_str());
@@ -635,38 +771,44 @@ void serviceMqtt() {
     return;
   }
 
-  Serial.printf("failed (state %d)\n", mqtt.state());
+  Serial.printf("failed (state %d)\n", mqtt.state());   // %d = whole number that may be negative
 #if MQTT_USE_TLS
-  char reason[80];
+  char reason[80];   // a C text buffer: room for 79 characters plus the end marker
   int sslError = mqttSocket.getLastSSLError(reason, sizeof(reason));
   if (sslError != 0) {
     Serial.printf("  TLS error %d: %s\n", sslError, reason);
     Serial.println("  (a certificate error usually means Adafruit IO changed certificate authority - see mqtt_roots.h)");
   }
 #endif
+  // Back off: wait longer after each failure, up to a minute.
   if (retryDelay == 0)          retryDelay = MQTT_RETRY_MS;
-  else if (retryDelay < 30000)  retryDelay *= 2;
+  else if (retryDelay < 30000)  retryDelay *= 2;   // *= doubles it: retryDelay = retryDelay * 2
   else                          retryDelay = 60000;
   Serial.printf("  retrying in %lu s\n", (unsigned long)(retryDelay / 1000));
 }
 
-// Feeds:
-//   espweb.brightness  0-100
-//   espweb.color       colour name ("Blue", "Hot Pink") or hex ("#FF8800")
-//   espweb.onoff and espweb.button
-//                      ON, OFF, WHITE,
-//                      SOLID, FADE, RAINBOW, RANDOM, SMOOTH (or PALETTE), STEPPED, CANDLE,
-//                      or a palette name: CLOUD, OCEAN, PARTY, HEAT, FOREST, LAVA
-//   espweb.outtopic    (published by the lamp) status report
+// Called by the MQTT library whenever a message arrives on a feed we
+// subscribed to. The message arrives as raw bytes (payload) with a length,
+// not as ready-made text, so the first job is to copy it into a String.
+//
+// Feeds (with FEED_GROUP from config.h, e.g. "espweb"):
+//   <group>.brightness  0-100
+//   <group>.color       colour name ("Blue", "Hot Pink") or hex ("#FF8800")
+//   <group>.onoff and <group>.button
+//                       ON, OFF, WHITE,
+//                       SOLID, FADE, RAINBOW, RANDOM, SMOOTH (or PALETTE), STEPPED, CANDLE,
+//                       or a palette name: CLOUD, OCEAN, PARTY, HEAT, FOREST, LAVA
+//   <group>.outtopic    (published by the lamp) status report
 void onMqttMessage(char *topic, byte *payload, unsigned int length) {
   String feed(topic);
   String text;
-  text.reserve(length);
-  for (unsigned int i = 0; i < length; i++) text += (char)payload[i];
+  text.reserve(length);   // set aside memory once, rather than growing it letter by letter
+  for (unsigned int i = 0; i < length; i++) text += (char)payload[i];   // (char) treats each byte as a letter
   text.trim();
   Serial.printf("Adafruit IO: %s = %s\n", feed.c_str(), text.c_str());
 
   if (feed == topicBrightness) {
+    // constrain() keeps a value inside a range; map() rescales 0-100 to 1-255.
     long percent = constrain(text.toInt(), 0L, 100L);
     setBrightness(map(percent, 0, 100, 1, 255));
     return;
@@ -679,6 +821,8 @@ void onMqttMessage(char *topic, byte *payload, unsigned int length) {
     return;
   }
 
+  // Everything else is a command word. `return setPower(true);` calls the
+  // function and then leaves onMqttMessage, so only one command runs.
   text.toLowerCase();
   if (text == "on")    return setPower(true);
   if (text == "off")   return setPower(false);
@@ -693,7 +837,7 @@ void onMqttMessage(char *topic, byte *payload, unsigned int length) {
   Serial.println("  unknown command");
 }
 
-// The report shown in the dashboard's status block.
+// The report shown in the dashboard's status block. "\n" starts a new line.
 String statusText() {
   String s;
   s.reserve(260);
@@ -703,10 +847,11 @@ String statusText() {
     s += "\nPalette: "; s += PALETTES[lamp.palette].name;
   }
   if (lamp.mode == MODE_SOLID) {
-    char hex[8];
+    char hex[8];   // "#RRGGBB" is 7 characters, plus 1 for the end-of-text marker
     snprintf(hex, sizeof(hex), "#%02X%02X%02X", lamp.colour.r, lamp.colour.g, lamp.colour.b);
     s += "\nColour: ";  s += hex;
   }
+  // + 127 rounds to the nearest percent instead of always rounding down
   s += "\nBrightness: "; s += (lamp.brightness * 100 + 127) / 255; s += "%";
   s += "\nWi-Fi: ";     s += WiFi.SSID(); s += " ("; s += WiFi.RSSI(); s += " dBm)";
   s += "\nIP: ";        s += WiFi.localIP().toString();
@@ -716,10 +861,12 @@ String statusText() {
   return s;
 }
 
+// How long the lamp has been running, e.g. "2h 05m" or "3d 4h 10m".
 String uptimeText() {
-  uint32_t minutes = millis() / 60000;
+  uint32_t minutes = millis() / 60000;   // whole-number division drops the remainder
   uint32_t days = minutes / 1440, hours = (minutes / 60) % 24, mins = minutes % 60;
   char text[24];
+  // snprintf writes formatted text into a buffer, never more than sizeof(text).
   if (days > 0) snprintf(text, sizeof(text), "%lud %luh %lum", (unsigned long)days, (unsigned long)hours, (unsigned long)mins);
   else          snprintf(text, sizeof(text), "%luh %02lum", (unsigned long)hours, (unsigned long)mins);
   return String(text);
@@ -737,23 +884,31 @@ void publishStatusIfDue() {
 
   if (mqtt.publish(topicStatus.c_str(), statusText().c_str())) {
     statusPending = false;
-    lastStatusAt = (now == 0) ? 1 : now;
+    lastStatusAt = (now == 0) ? 1 : now;   // never store 0, which means "never sent"
   }
 }
 
 
 // ===========================================================================
-// Web interface
+// 9. Web interface
 // ===========================================================================
-// Endpoints (all GET, all answer with the lamp state as JSON):
+// The web page (web_page.h) is one HTML file with JavaScript in it. It talks
+// to the lamp through these addresses; every one answers with the lamp's
+// current state as JSON (a text format JavaScript can read directly).
 //   /state
 //   /power?on=1|0
 //   /colour?hex=RRGGBB        (a colour name also works)
 //   /brightness?value=1-255
 //   /mode?id=1-7
 //   /palette?id=0-5
+//
+// web.on("/address", function) registers a handler: "when a browser asks for
+// this address, run this function". The functions here are lambdas (see
+// startOta). web.arg("name") reads a value from the address, e.g. the 3 in
+// /mode?id=3.
 void startWebServer() {
-  web.on("/", []() { web.send_P(200, "text/html", WEB_PAGE); });
+  // send_P sends text stored in flash memory (PROGMEM), see web_page.h.
+  web.on("/", []() { web.send_P(200, "text/html", WEB_PAGE); });   // 200 = "OK"
 
   web.on("/state", replyWithState);
 
@@ -771,7 +926,7 @@ void startWebServer() {
   });
 
   web.on("/brightness", []() {
-    long level = web.arg("value").toInt();
+    long level = web.arg("value").toInt();   // toInt() gives 0 if the text isn't a number
     if (level < 1 || level > 255) return replyBadRequest("value must be 1-255");
     setBrightness(level);
     replyWithState();
@@ -792,25 +947,29 @@ void startWebServer() {
     replyWithState();
   });
 
+  // Any other address gets the standard "404 Not Found" answer.
   web.onNotFound([]() { web.send(404, "text/plain", "Not found\n"); });
   web.begin();
 }
 
 void replyWithState() {
-  web.sendHeader("Cache-Control", "no-store");
+  web.sendHeader("Cache-Control", "no-store");   // tell the browser not to reuse an old answer
   web.send(200, "application/json", stateAsJson());
 }
 
 void replyBadRequest(const char *reason) {
-  web.send(400, "text/plain", String(reason) + "\n");
+  web.send(400, "text/plain", String(reason) + "\n");   // 400 = "Bad Request"
 }
 
+// Builds the JSON answer by hand, for example:
+//   {"on":true,"mode":3,"palette":1,"brightness":128,"colour":"#ffb46b",...}
+// Inside C text, \" is a quote mark, because a plain " would end the text.
 String stateAsJson() {
   char colour[8];
   snprintf(colour, sizeof(colour), "#%02x%02x%02x", lamp.colour.r, lamp.colour.g, lamp.colour.b);
 
   String json;
-  json.reserve(340);
+  json.reserve(360);
   json += "{\"on\":";
   json += lamp.on ? "true" : "false";
   json += ",\"mode\":";       json += lamp.mode;
@@ -819,7 +978,7 @@ String stateAsJson() {
   json += ",\"colour\":\"";   json += colour;
   json += "\",\"palettes\":[";
   for (uint8_t i = 0; i < PALETTE_COUNT; i++) {
-    if (i) json += ',';
+    if (i) json += ',';   // a comma between names, but not before the first
     json += '"';
     json += PALETTES[i].name;
     json += '"';

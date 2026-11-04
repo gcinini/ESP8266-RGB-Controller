@@ -16,7 +16,8 @@ Wi-Fi firmware for a WS2812B LED lamp built on a Wemos D1 Mini (ESP8266). You co
 
 ```
 ESP8266-RGB-Web-Server/          the sketch (open this folder in the Arduino IDE)
-├── ESP8266-RGB-Web-Server.ino   firmware
+├── ESP8266-RGB-Web-Server.ino   firmware, with comments explaining how it works
+├── config.h                     settings for each lamp (LED count, pin, name, feed group...)
 ├── web_page.h                   the web interface (HTML/CSS/JS stored in flash)
 ├── mqtt_roots.h                 root certificates trusted for the encrypted Adafruit IO connection
 ├── secrets.example.h            template for your credentials
@@ -28,15 +29,42 @@ THIRD_PARTY_NOTICES.md           licenses of the libraries compiled into the fir
 
 ## Hardware
 
-| Item | Default | Where to change it |
+| Item | Lamp 1 | Setting in `config.h` |
 |---|---|---|
 | Board | Wemos D1 Mini (ESP8266) | |
 | LED strip | WS2812B, GRB colour order | `LED_TYPE`, `LED_ORDER` |
 | Number of LEDs | 35 | `LED_COUNT` |
 | Data pin | D4 | `LED_PIN` |
 | LEDs used by Candle mode | 14, counted from LED 0 | `CANDLE_LEDS`, `CANDLE_AT_LED_ZERO` |
+| Power limit | off | `MAX_MILLIAMPS` |
+
+Each WS2812B LED can draw about 60 mA at full white, so 35 LEDs can need over 2 A. If your power supply is smaller, set `MAX_MILLIAMPS` to what it can deliver (for example `1500` for a 2 A supply) and the lamp dims itself just enough to stay under it.
 
 The lamp looks best with the strip wound in a spiral around a tube about 4 cm (1.5 in) across, inside a frosted or opaque jar. The diffuser blends the individual LEDs into an even glow, and the spiral makes the rainbow and palette animations travel smoothly up the lamp.
+
+## Configuration
+
+All the settings you might change for a particular lamp are in **`ESP8266-RGB-Web-Server/config.h`**, with a comment explaining each one. Passwords and keys are not in it; they go in `secrets.h`.
+
+`config.h` has one block of settings per lamp, numbered by `LAMP_ID`:
+
+| Setting | What it is |
+|---|---|
+| `DEVICE_NAME` | Network name, shown on the web page and used for OTA. Must be unique per lamp |
+| `LED_COUNT`, `LED_PIN`, `LED_TYPE`, `LED_ORDER` | The LED strip |
+| `CANDLE_LEDS`, `CANDLE_AT_LED_ZERO` | Size and position of the Candle mode flame |
+| `FEED_GROUP` | Adafruit IO feed group (`espweb` for lamp 1) |
+
+Below the lamp blocks are settings shared by every lamp: power limit, starting colour and brightness, animation speed, and Adafruit IO and NTP servers.
+
+### More than one lamp
+
+1. In `config.h`, fill in the `LAMP_ID == 2` block: a different `DEVICE_NAME`, its LED count, and its own `FEED_GROUP`, for example `lamp2`.
+2. **PlatformIO:** in `platformio.ini`, remove the `;` from the `lamp2_usb` and `lamp2_ota` sections and set lamp 2's IP address. Then upload with `pio run -e lamp2_usb -t upload` (first time) or `pio run -e lamp2_ota -t upload`.
+   **Arduino IDE:** change `#define LAMP_ID 1` at the top of `config.h` to `2` before uploading to lamp 2, and back to `1` for lamp 1.
+3. On Adafruit IO, make a dashboard for the new feed group (`lamp2.onoff`, `lamp2.button` and so on). Each lamp uses 5 feeds, and the free plan allows 10, so two lamps fit exactly.
+
+Both lamps share the same `secrets.h`, the same Wi-Fi and the same Adafruit IO account. Each needs its own `FEED_GROUP`: two lamps on the same group would both react to every button, and their status reports would overwrite each other.
 
 ## Building
 
@@ -51,8 +79,8 @@ Open the repo folder in VS Code. PlatformIO downloads the board package and the 
 | Task | Command |
 |---|---|
 | Build | `pio run` |
-| Upload over USB | `pio run -t upload` |
-| Upload over Wi-Fi (OTA) | `pio run -e d1_mini_ota -t upload` |
+| Upload lamp 1 over USB | `pio run -t upload` |
+| Upload lamp 1 over Wi-Fi (OTA) | `pio run -e d1_mini_ota -t upload` |
 | Serial monitor | `pio device monitor` |
 
 ### 2b. Arduino IDE
@@ -66,9 +94,11 @@ There's nothing else to upload: the web page is part of the firmware.
 
 ## Using it
 
-After boot, the serial monitor shows the lamp's address, for example `http://192.168.1.50/` (or `http://ESP-lightbox1.local/`). Open it in a browser. The page refreshes itself every few seconds, so changes made through Adafruit IO show up there too. Its **Network** section shows the address, Wi-Fi signal, Adafruit IO connection and firmware version.
+After boot, the serial monitor shows the lamp's address, for example `http://192.168.1.50/` (or `http://ESP-lightbox1.local/`). Open it in a browser. The page refreshes itself every few seconds, so changes made through Adafruit IO show up there too. The page heading shows the lamp's `DEVICE_NAME`, and its **Network** section shows the address, Wi-Fi signal, Adafruit IO connection and firmware version.
 
 ### Adafruit IO feeds
+
+Feed names start with the lamp's `FEED_GROUP` from `config.h`. Lamp 1 uses `espweb`:
 
 | Feed | Values |
 |---|---|
@@ -96,7 +126,7 @@ Wi-Fi: gc-dev (-63 dBm)
 IP: 192.168.30.30
 Host: ESP-lightbox1.local
 Adafruit IO: encrypted (TLS)
-Firmware: v3.3.0, up 2h 05m
+Firmware: v3.4.0, up 2h 05m
 ```
 
 If the lamp loses its connection, the report simply stops updating, so check the block's timestamp to see how fresh it is.
@@ -181,6 +211,7 @@ git checkout v3.0.4
 
 | Version | Highlights |
 |---|---|
+| 3.4.0 | Settings moved to `config.h`, with support for several lamps; optional power limit; web page shows the lamp's name; code comments written for beginners |
 | 3.3.0 | Encrypted Adafruit IO connection (TLS, port 8883) with root-certificate checking |
 | 3.2.0 | Candle mode; status report to Adafruit IO; every mode and palette controllable over MQTT; Network section on the web page; OTA across VLANs |
 | 3.1.0 | New web interface using the browser's own colour picker (no jscolor, no LittleFS upload); firmware rewritten; MIT license |
@@ -188,6 +219,18 @@ git checkout v3.0.4
 | 3.0.2 | Sketch moved into its own folder for the Arduino IDE; PlatformIO support; credentials moved to `secrets.h` |
 | 3.0.0 – 3.0.1 | FastLED palettes, Adafruit IO (MQTT), OTA updates |
 | 2.1.0 | First FastLED web-server version |
+
+## Learning from the code
+
+The sketch is commented for people learning C and C++, with an explanation the first time each idea appears. Open `ESP8266-RGB-Web-Server.ino` and start with **HOW TO READ THIS FILE** at the top. A good order to follow it in:
+
+1. **`setup()` and `loop()`** (section 3): what runs once at start-up and what repeats forever.
+2. **`lampChanged()`** (section 4): every change goes through it.
+3. **`drawFrame()`** (section 6): the non-blocking timer, and how a frame is drawn.
+4. **`onMqttMessage()`** (section 8): how an Adafruit IO message becomes a change.
+5. **`startWebServer()`** (section 9), and the JavaScript in `web_page.h`: how the web page talks to the lamp.
+
+Then try small changes, such as the colour of the candle flame in `drawCandle()` or a new name in `COLOUR_NAMES`, and upload them over OTA.
 
 ## License
 

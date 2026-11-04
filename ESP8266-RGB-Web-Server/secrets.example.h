@@ -2,6 +2,11 @@
 //
 // Copy this file to secrets.h (same folder) and fill in real values.
 // secrets.h is listed in .gitignore, so it never gets committed.
+//
+// Only passwords and keys go here. Everything else you might change when
+// setting up a lamp (LED count, pin, name...) is in config.h. If you have
+// several lamps on the same Wi-Fi and Adafruit IO account, they all share
+// this one secrets.h.
 
 #pragma once
 

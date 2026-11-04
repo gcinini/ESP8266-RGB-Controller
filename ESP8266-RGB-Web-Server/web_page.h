@@ -3,10 +3,21 @@
 // Copyright (c) 2019-2026 G Cinini
 // SPDX-License-Identifier: MIT
 //
-// The page talks to the lamp through small JSON endpoints (see README.md):
+// This whole file is ONE piece of text: a complete web page (HTML for the
+// layout, CSS for the looks, JavaScript for the behaviour). The lamp sends it
+// to the browser, and from then on the JavaScript runs *in the browser*, not
+// on the ESP8266. It talks to the lamp through small addresses that answer
+// with JSON (see section 9 of the sketch):
 //   /state, /power, /colour, /brightness, /mode, /palette
-// It polls /state every few seconds, so changes made through Adafruit IO show up too.
+// It asks /state every few seconds, so changes made through Adafruit IO show up too.
 // Colour selection uses the browser's built-in <input type="color"> picker.
+//
+// Two C++ details make this work:
+//   * R"page( ... )page" is a *raw string literal*: everything between the
+//     brackets is taken exactly as written, so the HTML can contain quote
+//     marks and backslashes without escaping each one.
+//   * PROGMEM keeps the text in flash memory instead of copying it into the
+//     ESP8266's small RAM. That's why the sketch sends it with send_P().
 
 #pragma once
 
@@ -48,7 +59,7 @@ static const char WEB_PAGE[] PROGMEM = R"page(<!doctype html>
 </head>
 <body>
 <main>
-  <h1>Lightbox</h1>
+  <h1 id="name">Lightbox</h1>
   <p id="status">Connecting&hellip;</p>
 
   <section>
@@ -88,13 +99,16 @@ static const char WEB_PAGE[] PROGMEM = R"page(<!doctype html>
 </main>
 
 <script>
+  // Mode numbers and button labels. The numbers must match MODE_... in the sketch.
   const MODES = [
     [1, 'Solid colour'], [2, 'Colour fade'], [3, 'Rainbow'],
     [4, 'Random'], [5, 'Palette, smooth'], [6, 'Palette, stepped'], [7, 'Candle']
   ];
+  // el('status') is shorthand for "the element with id=status". `id => ...` is an arrow function.
   const el = id => document.getElementById(id);
-  let paletteNames = null;
+  let paletteNames = null;   // filled in from the lamp's first answer
 
+  // Creates a <button> that runs onClick when pressed.
   function makeButton(label, onClick) {
     const b = document.createElement('button');
     b.textContent = label;
@@ -103,6 +117,8 @@ static const char WEB_PAGE[] PROGMEM = R"page(<!doctype html>
   }
 
   // Calls one of the lamp's endpoints; every endpoint answers with the full state.
+  // fetch() works in the background: .then() runs when the answer arrives,
+  // .catch() runs if anything went wrong (lamp offline, bad answer).
   function send(path) {
     return fetch('/' + path)
       .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
@@ -121,7 +137,12 @@ static const char WEB_PAGE[] PROGMEM = R"page(<!doctype html>
     };
   }
 
+  // Updates every control from the lamp's state (the JSON object `s`).
   function render(s) {
+    // Show this lamp's own name, so two lamps are easy to tell apart
+    el('name').textContent = s.host;
+    document.title = s.host;
+
     if (!paletteNames) {
       paletteNames = s.palettes;
       paletteNames.forEach((name, i) => el('palettes').appendChild(makeButton(name, () => send('palette?id=' + i))));
@@ -170,6 +191,7 @@ static const char WEB_PAGE[] PROGMEM = R"page(<!doctype html>
   el('colour').addEventListener('input', throttle(() => send('colour?hex=' + el('colour').value.slice(1)), 150));
   el('brightness').addEventListener('input', throttle(() => send('brightness?value=' + el('brightness').value), 150));
 
+  // Start: ask for the state now, then every 5 seconds while the page is visible
   send('state');
   setInterval(() => { if (!document.hidden) send('state'); }, 5000);
 </script>
