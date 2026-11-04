@@ -46,7 +46,7 @@
 
 //FastLED setup
 #define DATA_PIN  D4 // Using WeMos D4 pin for the control line
-#define NUM_LEDS  30 // Make sure you change this to the number of LEDs in the strip
+#define NUM_LEDS  35 // Make sure you change this to the number of LEDs in the strip
 #define LED_TYPE  WS2812B
 #define COLOR_ORDER GRB
 #define UPDATES_PER_SECOND 50
