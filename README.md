@@ -21,12 +21,11 @@ ESP8266-RGB-Web-Server/          <- current sketch (v3.x), open this in Arduino 
 ├── secrets.h                    your credentials (git-ignored, create it yourself)
 └── data/
     └── jscolor.js               served from LittleFS, must be uploaded separately
-ESP8266_WiFi_RGB_Lamp_FINAL/     legacy sketch (v1/v2): Adafruit NeoPixel, includes candle mode
 Circuit Construction Notes.txt
 platformio.ini                   PlatformIO build settings (VS Code)
 ```
 
-Each sketch folder has the same name as its `.ino` file, which is what the Arduino IDE needs to open it.
+The sketch folder has the same name as its `.ino` file, which is what the Arduino IDE needs to open it.
 
 ## Hardware
 
@@ -73,7 +72,7 @@ Copy `ESP8266-RGB-Web-Server/secrets.example.h` to `secrets.h` in the same folde
 
 `platformio.ini` in the repo root points PlatformIO at the same `ESP8266-RGB-Web-Server/` folder, so both tools build the same files. PlatformIO downloads the board package and libraries itself, so steps 1 and 2 are only needed for the Arduino IDE. Step 3 (`secrets.h`) is needed for both.
 
-Open the repo folder in VS Code, then use the PlatformIO toolbar or these commands:
+Open the repo folder in VS Code, then use the PlatformIO toolbar (the ✓ and → icons in the status bar) or run these commands in a **PlatformIO Core CLI** terminal (PlatformIO sidebar → Quick Access → Miscellaneous). A regular terminal won't find `pio` unless `%USERPROFILE%\.platformio\penv\Scripts` is on your PATH.
 
 | Task | Command |
 |---|---|
@@ -90,6 +89,8 @@ Releases are tagged with [Semantic Versioning](https://semver.org/) (`v2.1.0`, `
 ```bash
 git checkout v2.1.0
 ```
+
+The original 2019 lamp sketch (`ESP8266_WiFi_RGB_Lamp_FINAL`, Adafruit NeoPixel with candle mode) was removed after v3.0.2. It is still in the history: check out `v3.0.2` or earlier to get it back.
 
 ## Ideas for the future
 
