@@ -57,8 +57,8 @@ byte index_start;
 byte index_end;
 // END OF CANDLE MODE RELATED STUFF ////////////////////////////////////////////////////
 
-const char *ssid = "gchome";
-const char *password = "***REMOVED***";
+const char *ssid = "YOUR_WIFI_SSID";
+const char *password = "YOUR_WIFI_PASSWORD";
 MDNSResponder mdns;
 
 ESP8266WebServer server ( 80 );

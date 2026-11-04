@@ -1,48 +1,109 @@
-# ESP8266-RGB-Controller
-A Wi-Fi web server for the ESP8266 platform driving a WS2812B addressable RGB Led strip - Arduino sketch
+# ESP8266 RGB Controller
 
-Developed on top of the original project: https://github.com/giznoise/Arduino-ESP8266-RGB-Web-Server
-Also derived inspiration from:
-https://github.com/Makerspaceteam04/Arduino-ESP8266-RGB-Web-Server
-https://github.com/kakopappa/arduino-esp8266-alexa-wemo-switch
+A Wi-Fi web server for the ESP8266 that drives a WS2812B addressable RGB LED strip. You control it from a browser on your network, or remotely through Adafruit IO (MQTT). It's built for a Wemos D1 Mini inside a glowing "lightbox" lamp.
 
-Description:
-An Arduino sketch for running a Wi-Fi web server on the ESP8266. I am using a Wemos D1 Mini. Designed to drive the WS2812B addressable RGB Led strips using the Adafruit Neopixel Arduino library.
+## Features
 
-Original project came from 
+- **Web interface** with an on/off switch, a colour picker (jscolor), brightness, mode selection and palette selection
+- **Modes:** fixed colour, colour fade, rainbow, random palette cycling, and palette animations with or without blending
+- **Palettes:** Cloud, Party, Heat, Ocean
+- **Remote control over MQTT** through Adafruit IO feeds (`espweb.onoff`, `espweb.color`, `espweb.brightness`, `espweb.button`)
+- **Over-the-air (OTA) firmware updates.** The device shows up as `lightbox1` in the Arduino IDE port list.
+- **Remembers its state.** Colour, brightness and mode are saved to EEPROM and restored on power-up.
 
-Construction Notes:
-The software has been written to give the best effects with a 60 LED WS2812 RGB LED strip but will work with any. The number of LED's in your strip can be set in code.
+## Repository layout
 
-To get the best effects (especially in candle mode) wrap the strip around a tube approx. 1.5 inches dia. to form a cylinder of light. Place this in an opaque container to obfuscate the individual LED's to give an overall 'glow'.
+```
+ESP8266-RGB-Web-Server/          <- current sketch (v3.x), open this in Arduino IDE
+├── ESP8266-RGB-Web-Server.ino
+├── html_pages.h                 web UI pages (stored in PROGMEM)
+├── secrets.example.h            template for your credentials
+├── secrets.h                    your credentials (git-ignored, create it yourself)
+└── data/
+    └── jscolor.js               served from LittleFS, must be uploaded separately
+ESP8266_WiFi_RGB_Lamp_FINAL/     legacy sketch (v1/v2): Adafruit NeoPixel, includes candle mode
+Circuit Construction Notes.txt
+platformio.ini                   PlatformIO build settings (VS Code)
+```
 
-This ensures that the rainbow mode is effective and also the candle mode appears to be a small tea light or candle at the bottom of the container.
+Each sketch folder has the same name as its `.ino` file, which is what the Arduino IDE needs to open it.
 
-Implements the following:
+## Hardware
 
-Adafruit Neopixel Library:
-https://learn.adafruit.com/adafruit-neopixel-uberguide?view=all#arduino-library
+| Item | Default | Where to change it |
+|---|---|---|
+| Board | Wemos D1 Mini (ESP8266) | |
+| LED strip | WS2812B, GRB colour order | `LED_TYPE`, `COLOR_ORDER` |
+| Number of LEDs | 30 | `NUM_LEDS` |
+| Data pin | D4 | `DATA_PIN` |
 
-ESP8266 Web Server:
-https://github.com/esp8266/Arduino/blob/master/libraries/ESP8266WebServer/examples/AdvancedWebServer/AdvancedWebServer.ino
+See *Circuit Construction Notes.txt* for how the lamp is built. In short, the strip is wrapped around a tube about 1.5 inches across and placed inside an opaque jar so the LEDs blend into an even glow.
 
-Useful Information:
+## Building
 
-ESP8266 Setup Guide:
-https://learn.sparkfun.com/tutorials/esp8266-thing-hookup-guide?_ga=1.192693098.1720005138.1446065268
+### 1. Install the ESP8266 board package
 
-Future improvements I would like too add:
+In **File → Preferences → Additional boards manager URLs**, add:
 
-	1) Additional operation mode that allows the user to set a 'sunrise' wake-up alarm. The lamp will switch on at a certain time at zero brightness and then gradually get brighter and brighter over a user definable period of time. The color setting should also be user definable. Perhaps implementing an internet time look up to update an on-board clock.
+```
+https://arduino.esp8266.com/stable/package_esp8266com_index.json
+```
 
-	2) Test all this on a standard ESP8266-12F (around $5) rather than using the 'Sparkfun ESP8266 Thing'. - UPDATE: Done, it works Ok.
+Then go to **Tools → Board → Boards Manager**, install **esp8266**, and select **LOLIN(WEMOS) D1 R2 & mini**.
 
-	3) Allow the user to set the transition time (via the html menu system), between colors for the color fade mode and rainbow mode.
+### 2. Install the libraries
 
-	4) Update 21/07/2016 - Candle mode added. Experiment with '#define CANDLEPIXELS XX' (default 30) to get the best effect for your set up. Use more or less pixels to suit how bright you want the candle to be. Tweak the code if you want to try and make a better candle effect. Brightness and Colour set mode do not function when in candle mode because colour and brightness level are fundamental parts of the candle effect.
+From **Library Manager**:
 
-	5) Add more modes - Strobe, Disco, Breathing 
+- **FastLED**
+- **PubSubClient** (by Nick O'Leary)
 
-	6) Start the RGB Lamp in AP Mode first so that a user can connect directly and determine the I.P. Address it occupies on the local network. Maybe give 20 seconds for an incoming AP connection, then switch to server mode / normal operation. 
+The ESP8266 board package already includes the Wi-Fi, web server, mDNS, EEPROM, ArduinoOTA and LittleFS libraries.
 
-	The only way to determine the IP address of the lamp at the moment is to either connect to the serial port and monitor the output on start-up or log into your router. You can either tell the router to allocate an IP address based on the MAC address of your ESP8266 or just look to see what is connected and on what IP in your router logs.
+### 3. Add your credentials
+
+Copy `ESP8266-RGB-Web-Server/secrets.example.h` to `secrets.h` in the same folder, then fill in your Wi-Fi network and your Adafruit IO username and key. `secrets.h` is git-ignored, so your credentials never reach GitHub. If the file is missing, the build stops with a message telling you to create it.
+
+### 4. Upload the sketch and the web files
+
+1. Open `ESP8266-RGB-Web-Server/ESP8266-RGB-Web-Server.ino` and upload it, either over USB or over the air to `lightbox1`.
+2. Upload the `data/` folder to LittleFS. Without this step the colour picker won't load. In Arduino IDE 2.x, install the [arduino-littlefs-upload](https://github.com/earlephilhower/arduino-littlefs-upload) plugin, close the Serial Monitor, then press `Ctrl+Shift+P` and run **Upload LittleFS to Pico/ESP8266/ESP32**.
+
+### PlatformIO (VS Code)
+
+`platformio.ini` in the repo root points PlatformIO at the same `ESP8266-RGB-Web-Server/` folder, so both tools build the same files. PlatformIO downloads the board package and libraries itself, so steps 1 and 2 are only needed for the Arduino IDE. Step 3 (`secrets.h`) is needed for both.
+
+Open the repo folder in VS Code, then use the PlatformIO toolbar or these commands:
+
+| Task | Command |
+|---|---|
+| Build | `pio run` |
+| Upload over USB | `pio run -t upload` |
+| Upload over Wi-Fi (OTA) | `pio run -e d1_mini_ota -t upload` |
+| Upload `data/` to LittleFS | `pio run -t uploadfs` |
+| Serial monitor | `pio device monitor` |
+
+## Versions
+
+Releases are tagged with [Semantic Versioning](https://semver.org/) (`v2.1.0`, `v3.0.0`, `v3.0.1`, ...). See the **Releases** and **Tags** pages on GitHub. To check out an older version:
+
+```bash
+git checkout v2.1.0
+```
+
+## Ideas for the future
+
+- Sunrise wake-up alarm, with brightness slowly rising to a chosen colour, using internet time
+- Adjustable transition speed for the fade and rainbow modes
+- More modes: strobe, disco, breathing
+- Wi-Fi setup through a captive portal (AP mode) instead of hard-coded credentials
+- Re-enable mDNS so the lamp is reachable at `lightbox1.local`
+
+## Credits
+
+Built on top of:
+
+- https://github.com/giznoise/Arduino-ESP8266-RGB-Web-Server (original project)
+- https://github.com/Makerspaceteam04/Arduino-ESP8266-RGB-Web-Server
+- https://github.com/kakopappa/arduino-esp8266-alexa-wemo-switch
+- [FastLED](https://fastled.io/), [PubSubClient](https://github.com/knolleary/pubsubclient), [jscolor](https://jscolor.com/)

@@ -34,6 +34,14 @@
 #include <FastLED.h>
 
 #include "html_pages.h"
+
+// Wi-Fi and Adafruit IO credentials live in secrets.h, which git ignores.
+// Copy secrets.example.h to secrets.h and fill in your own values.
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+#error "secrets.h not found: copy secrets.example.h to secrets.h and fill in your credentials"
+#endif
 #include <LittleFS.h>
 
 //FastLED setup
@@ -53,8 +61,8 @@ extern const TProgmemPalette16 myRedWhiteBluePalette_p PROGMEM;
 
 //MQTT Connection Setup
 #define mqtt_server "io.adafruit.com"
-#define mqtt_user "gcinini"
-#define mqtt_password "***REMOVED***"
+#define mqtt_user MQTT_USER
+#define mqtt_password MQTT_KEY
 
 WiFiClient espClient;			// Declares a WiFiClient Object using ESP8266WiFi
 PubSubClient client(espClient); // instanciates Pubsub MQTT client
@@ -66,8 +74,8 @@ PubSubClient client(espClient); // instanciates Pubsub MQTT client
 #define button_topic "gcinini/feeds/espweb.button"
 
 //Wifi settings
-const char *ssid = "gc-dev";
-const char *password = "***REMOVED***";
+const char *ssid = WIFI_SSID;
+const char *password = WIFI_PASSWORD;
 
 //MDNSResponder mdns;
 
