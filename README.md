@@ -126,7 +126,7 @@ Wi-Fi: gc-dev (-63 dBm)
 IP: 192.168.30.30
 Host: ESP-lightbox1.local
 Adafruit IO: encrypted (TLS)
-Firmware: v3.4.0, up 2h 05m
+Firmware: v3.4.1, up 2h 05m
 ```
 
 If the lamp loses its connection, the report simply stops updating, so check the block's timestamp to see how fresh it is.
@@ -211,7 +211,7 @@ git checkout v3.0.4
 
 | Version | Highlights |
 |---|---|
-| 3.4.0 | Settings moved to `config.h`, with support for several lamps; optional power limit; web page shows the lamp's name; code comments written for beginners |
+| 3.4.1 | Settings moved to `config.h`, with support for several lamps; optional power limit; web page shows the lamp's name; code comments written for beginners |
 | 3.3.0 | Encrypted Adafruit IO connection (TLS, port 8883) with root-certificate checking |
 | 3.2.0 | Candle mode; status report to Adafruit IO; every mode and palette controllable over MQTT; Network section on the web page; OTA across VLANs |
 | 3.1.0 | New web interface using the browser's own colour picker (no jscolor, no LittleFS upload); firmware rewritten; MIT license |

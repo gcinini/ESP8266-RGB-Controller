@@ -1,5 +1,5 @@
 /*
-  ESP8266 RGB Controller  v3.4.0
+  ESP8266 RGB Controller  v3.4.1
 
   Wi-Fi controller for a WS2812B LED lamp on a Wemos D1 Mini (ESP8266).
   Control it from its own web page or through Adafruit IO (MQTT).
@@ -88,7 +88,7 @@
 // A `const` variable can't be changed after it is created. The compiler
 // stops you if you try. `const char *` is a pointer to text: in C, text is
 // stored as a row of characters, and the variable holds where it starts.
-const char *FIRMWARE_VERSION = "3.4.0";
+const char *FIRMWARE_VERSION = "3.4.1";
 
 #if MQTT_USE_TLS
 const uint16_t MQTT_PORT = 8883;   // encrypted MQTT
