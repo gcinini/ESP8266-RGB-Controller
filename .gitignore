@@ -20,3 +20,5 @@ desktop.ini
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+# Temporary file PlatformIO makes from the .ino while it builds
+*.ino.cpp
