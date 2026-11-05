@@ -60,6 +60,10 @@
 //                      flame in Candle mode.
 //   CANDLE_AT_LED_ZERO true if the first LED of the strip is at the bottom of
 //                      the lamp. If the flame appears at the top, set false.
+//   ALEXA_NAME         The name Alexa knows this lamp by ("Alexa, turn on the
+//                      lightbox"). Give each lamp a different name. If you change
+//                      it, ask Alexa to discover devices again and delete the old
+//                      one in the Alexa app.
 //   FEED_GROUP         Adafruit IO feed group. The lamp listens to
 //                      <group>.onoff, .button, .color, .brightness and reports
 //                      to <group>.outtopic. Give each lamp its own group so
@@ -76,6 +80,7 @@
   #define LED_ORDER            GRB
   #define CANDLE_LEDS          14
   #define CANDLE_AT_LED_ZERO   true
+  #define ALEXA_NAME           "Lightbox"
   #define FEED_GROUP           "espweb"
 
 #elif LAMP_ID == 2
@@ -87,6 +92,7 @@
   #define LED_ORDER            GRB
   #define CANDLE_LEDS          20
   #define CANDLE_AT_LED_ZERO   true
+  #define ALEXA_NAME           "Lightbox 2"
   #define FEED_GROUP           "lamp2"
 
 #else
@@ -120,6 +126,18 @@
 
 // --- Saving settings to flash --------------------------------------------------
 #define SAVE_DELAY_MS          2000   // save this long after the last change
+
+// --- Alexa ---------------------------------------------------------------------
+// The lamp pretends to be a Philips Hue colour bulb, so an Amazon Echo on the
+// same network finds it with "Alexa, discover devices" and controls it
+// directly - no Alexa skill, no cloud service in between. Alexa can switch it
+// on and off, set the brightness and set a colour (which selects Solid colour
+// mode). Modes such as Candle are not available by voice.
+// Set to 0 to turn this off. (Like MQTT_USE_TLS below, it can also be set
+// from secrets.h or a PlatformIO build flag, -D ENABLE_ALEXA=0, which wins.)
+#ifndef ENABLE_ALEXA
+#define ENABLE_ALEXA           1
+#endif
 
 // --- Adafruit IO (MQTT) ------------------------------------------------------
 #define MQTT_HOST              "io.adafruit.com"

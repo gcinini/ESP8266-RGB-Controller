@@ -1,8 +1,9 @@
 /*
-  ESP8266 RGB Controller  v3.4.1
+  ESP8266 RGB Controller  v3.5.0
 
   Wi-Fi controller for a WS2812B LED lamp on a Wemos D1 Mini (ESP8266).
-  Control it from its own web page or through Adafruit IO (MQTT).
+  Control it from its own web page, by voice through an Amazon Echo (Alexa),
+  or through Adafruit IO (MQTT).
 
   Copyright (c) 2019-2026 G Cinini
   SPDX-License-Identifier: MIT
@@ -29,7 +30,8 @@
     6. Drawing                            (turning the state into LED colours)
     7. Saving settings                    (so the lamp remembers after a power cut)
     8. Wi-Fi, OTA and Adafruit IO         (networking)
-    9. Web interface                      (the web page and its small API)
+    9. Alexa                              (voice control through an Echo)
+   10. Web interface                      (the web page and its small API)
 
   THE BIG IDEA
   ------------
@@ -38,8 +40,8 @@
   web page or Adafruit IO in the meantime.
 
   So nothing here ever waits for long. Instead:
-    * web requests and MQTT messages only CHANGE THE STATE (the `lamp`
-      variable) and return straight away;
+    * web requests, Alexa commands and MQTT messages only CHANGE THE STATE
+      (the `lamp` variable) and return straight away;
     * loop() then draws ONE animation frame from that state, and comes back
       around a few microseconds later to check the network again.
   This is called "non-blocking" code, and it is the most important pattern in
@@ -67,6 +69,13 @@
 #include <PubSubClient.h>       // MQTT, the messaging protocol Adafruit IO uses
 #include <time.h>               // the clock (needed to check certificate dates)
 
+// Espalexa makes the lamp look like a Philips Hue bulb to an Amazon Echo.
+// It keeps a table of devices; this lamp is one device, so reserve room for
+// just one (the default of 10 would waste memory). This #define must come
+// before the #include, because the library reads it while it is included.
+#define ESPALEXA_MAXDEVICES 1
+#include <Espalexa.h>
+
 // FastLED needs this setting *before* it is included: it makes pin names like
 // D4 mean the same thing to FastLED as they do to the rest of the sketch.
 #define FASTLED_ESP8266_RAW_PIN_ORDER
@@ -88,7 +97,7 @@
 // A `const` variable can't be changed after it is created. The compiler
 // stops you if you try. `const char *` is a pointer to text: in C, text is
 // stored as a row of characters, and the variable holds where it starts.
-const char *FIRMWARE_VERSION = "3.4.1";
+const char *FIRMWARE_VERSION = "3.5.0";
 
 #if MQTT_USE_TLS
 const uint16_t MQTT_PORT = 8883;   // encrypted MQTT
@@ -198,6 +207,13 @@ WiFiClient                mqttSocket;                     // plain network conne
 #endif
 PubSubClient     mqtt(mqttSocket);    // MQTT client that talks over mqttSocket
 
+#if ENABLE_ALEXA
+Espalexa         espalexa;            // answers the Echo's searches and commands
+// A pointer to the "bulb" Alexa sees. nullptr means "points to nothing yet";
+// startAlexa() creates the device and stores its address here.
+EspalexaDevice  *alexaLight = nullptr;
+#endif
+
 // Adafruit IO "topics" - the addresses of the feeds - built in setup().
 // String is a C++ class for text that can grow; it is easier than C text but
 // uses more memory, so this sketch uses it only where it helps.
@@ -250,6 +266,11 @@ void prepareMqttSocket();
 void serviceMqtt();
 void onMqttMessage(char *topic, byte *payload, unsigned int length);
 
+// Alexa
+void startAlexa();
+void onAlexaCommand(EspalexaDevice *device);
+void syncAlexa();
+
 // Web interface
 void startWebServer();
 void replyWithState();
@@ -299,7 +320,11 @@ void setup() {
 // responsive: loop() runs many thousands of times a second.
 void loop() {
   ArduinoOTA.handle();     // is someone sending a firmware update?
+#if ENABLE_ALEXA
+  espalexa.loop();         // web page requests AND the Echo's searches and commands
+#else
   web.handleClient();      // has the web page sent a request?
+#endif
   serviceMqtt();           // any Adafruit IO messages? reconnect if needed
   drawFrame();             // draw the next animation frame, if it's time
   saveSettingsIfDue();     // save settings, if it's time
@@ -366,6 +391,7 @@ void lampChanged() {
                      applyGamma_video(lamp.colour.g, COLOUR_GAMMA),
                      applyGamma_video(lamp.colour.b, COLOUR_GAMMA));
   preparePalette();
+  syncAlexa();   // so the Alexa app shows what the lamp is really doing
 
   // Don't save or report right now. Just note that it needs doing; loop()
   // does it a moment later (see saveSettingsIfDue and publishStatusIfDue).
@@ -840,7 +866,7 @@ void onMqttMessage(char *topic, byte *payload, unsigned int length) {
 // The report shown in the dashboard's status block. "\n" starts a new line.
 String statusText() {
   String s;
-  s.reserve(260);
+  s.reserve(300);
   s += "Power: ";       s += lamp.on ? "On" : "Off";
   s += "\nMode: ";      s += MODE_NAMES[lamp.mode];
   if (lamp.mode == MODE_PALETTE_SMOOTH || lamp.mode == MODE_PALETTE_STEPPED) {
@@ -856,6 +882,9 @@ String statusText() {
   s += "\nWi-Fi: ";     s += WiFi.SSID(); s += " ("; s += WiFi.RSSI(); s += " dBm)";
   s += "\nIP: ";        s += WiFi.localIP().toString();
   s += "\nHost: ";      s += DEVICE_NAME; s += ".local";
+#if ENABLE_ALEXA
+  s += "\nAlexa name: "; s += ALEXA_NAME;
+#endif
   s += "\nAdafruit IO: "; s += MQTT_USE_TLS ? "encrypted (TLS)" : "unencrypted";
   s += "\nFirmware: v"; s += FIRMWARE_VERSION; s += ", up "; s += uptimeText();
   return s;
@@ -890,7 +919,96 @@ void publishStatusIfDue() {
 
 
 // ===========================================================================
-// 9. Web interface
+// 9. Alexa
+// ===========================================================================
+// How it works:
+//   1. "Alexa, discover devices": the Echo sends a search message (SSDP) to
+//      every device on the local network. Espalexa answers "I am a Hue bridge".
+//   2. The Echo asks for the bridge's description (/description.xml) and its
+//      list of lights (/api/.../lights), and finds one colour light,
+//      ALEXA_NAME. These requests arrive on our own web server (port 80).
+//   3. "Alexa, set the lightbox to blue": the Echo sends a small JSON message
+//      to /api/.../lights/1/state, Espalexa decodes it and calls
+//      onAlexaCommand() below.
+// The Echo and the lamp must be on the same network (VLAN30 / gc-dev here),
+// because the search message doesn't cross into other networks.
+
+void startAlexa() {
+#if ENABLE_ALEXA
+  // `new` creates an object that lives until the program ends (a function's
+  // normal variables disappear when it returns). EspalexaDeviceType::color
+  // tells Alexa this is a bulb that supports colours, not just on/off.
+  alexaLight = new EspalexaDevice(ALEXA_NAME, onAlexaCommand, EspalexaDeviceType::color, lamp.brightness);
+  espalexa.addDevice(alexaLight);
+  syncAlexa();                 // start with the lamp's real state
+  // Share our web server with Espalexa. begin() adds its pages, starts
+  // listening for Echo searches, and then starts the web server. It returns
+  // false if it could not listen for searches - and in that case it does NOT
+  // start the web server, so we start it ourselves to keep the web page working.
+  if (espalexa.begin(&web)) {
+    Serial.printf("Alexa: ready as \"%s\" - say \"Alexa, discover devices\"\n", ALEXA_NAME);
+  } else {
+    web.begin();
+    Serial.println("Alexa: could not start (multicast failed) - web page still works");
+  }
+#else
+  web.begin();                 // without Alexa, start the web server ourselves
+#endif
+}
+
+#if ENABLE_ALEXA
+// Called by Espalexa whenever Alexa sends a command. `device` points to the
+// bulb, which now holds the values Alexa asked for. One message can carry
+// several changes at once (for example "on", a brightness and a colour), so
+// look at each value instead of only the last thing that changed.
+void onAlexaCommand(EspalexaDevice *device) {
+  // `->` reads a field or calls a method through a pointer: device->getValue()
+  // means "getValue() of the object device points to".
+  EspalexaDeviceProperty changed = device->getLastChangedProperty();
+  Serial.printf("Alexa: command (property %u, brightness %u)\n", (unsigned)changed, device->getValue());
+
+  if (changed == EspalexaDeviceProperty::off) {
+    setPower(false);
+    return;
+  }
+
+  // A colour request: hs = hue and saturation ("blue"), ct = colour
+  // temperature ("warm white"), xy = a colour chart position. Espalexa turns
+  // all three into ordinary red, green and blue values for us.
+  if (changed == EspalexaDeviceProperty::hs || changed == EspalexaDeviceProperty::ct ||
+      changed == EspalexaDeviceProperty::xy) {
+    setColour(CRGB(device->getR(), device->getG(), device->getB()));   // also selects Solid colour
+  }
+
+  // Brightness 1-255 ("set the lightbox to 40%"). getValue() is 0 only when off.
+  uint8_t level = device->getValue();
+  if (level > 0 && level != lamp.brightness) setBrightness(level);
+
+  // Any command other than "off" means the lamp should be on. Turning on keeps
+  // the current mode, so "Alexa, turn on the lightbox" brings back Candle or
+  // Rainbow if that was showing.
+  if (!lamp.on) setPower(true);
+}
+#endif
+
+// Copies the lamp's state into the Alexa bulb, so the Alexa app shows the
+// right on/off, brightness and colour after changes from the web page or
+// Adafruit IO. Called from lampChanged(); does nothing without Alexa.
+void syncAlexa() {
+#if ENABLE_ALEXA
+  if (alexaLight == nullptr) return;   // not created yet (during start-up)
+  alexaLight->setValue(lamp.on ? lamp.brightness : 0);   // 0 means "off" to Alexa
+  // Skip black (0,0,0): Espalexa's colour conversion divides by a total that
+  // is zero for black, which would send Alexa an invalid answer.
+  if (lamp.colour.r || lamp.colour.g || lamp.colour.b) {
+    alexaLight->setColor(lamp.colour.r, lamp.colour.g, lamp.colour.b);
+  }
+#endif
+}
+
+
+// ===========================================================================
+// 10. Web interface
 // ===========================================================================
 // The web page (web_page.h) is one HTML file with JavaScript in it. It talks
 // to the lamp through these addresses; every one answers with the lamp's
@@ -947,9 +1065,17 @@ void startWebServer() {
     replyWithState();
   });
 
-  // Any other address gets the standard "404 Not Found" answer.
-  web.onNotFound([]() { web.send(404, "text/plain", "Not found\n"); });
-  web.begin();
+  // Any other address: first give Espalexa a chance, because the Echo's
+  // requests (/api/...) arrive here. If it isn't one of those, answer with
+  // the standard "404 Not Found".
+  web.onNotFound([]() {
+#if ENABLE_ALEXA
+    if (espalexa.handleAlexaApiCall(web.uri(), web.arg(0))) return;   // arg(0) = the request body
+#endif
+    web.send(404, "text/plain", "Not found\n");
+  });
+
+  startAlexa();   // starts the web server too (see section 9)
 }
 
 void replyWithState() {
@@ -969,7 +1095,7 @@ String stateAsJson() {
   snprintf(colour, sizeof(colour), "#%02x%02x%02x", lamp.colour.r, lamp.colour.g, lamp.colour.b);
 
   String json;
-  json.reserve(360);
+  json.reserve(400);
   json += "{\"on\":";
   json += lamp.on ? "true" : "false";
   json += ",\"mode\":";       json += lamp.mode;
@@ -989,6 +1115,9 @@ String stateAsJson() {
   json += ",\"mqtt\":";       json += mqtt.connected() ? "true" : "false";
   json += ",\"tls\":";        json += MQTT_USE_TLS ? "true" : "false";
   json += ",\"heap\":";       json += ESP.getFreeHeap();
+#if ENABLE_ALEXA
+  json += ",\"alexa\":\"";    json += ALEXA_NAME; json += "\"";
+#endif
   json += ",\"version\":\"";  json += FIRMWARE_VERSION;
   json += "\",\"uptime\":\""; json += uptimeText();
   json += "\"}";

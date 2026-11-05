@@ -7,7 +7,7 @@
 // layout, CSS for the looks, JavaScript for the behaviour). The lamp sends it
 // to the browser, and from then on the JavaScript runs *in the browser*, not
 // on the ESP8266. It talks to the lamp through small addresses that answer
-// with JSON (see section 9 of the sketch):
+// with JSON (see section 10 of the sketch):
 //   /state, /power, /colour, /brightness, /mode, /palette
 // It asks /state every few seconds, so changes made through Adafruit IO show up too.
 // Colour selection uses the browser's built-in <input type="color"> picker.
@@ -168,6 +168,7 @@ static const char WEB_PAGE[] PROGMEM = R"page(<!doctype html>
       ['Address', s.host + '.local \u00b7 ' + s.ip],
       ['Wi-Fi', s.rssi + ' dBm (' + signalWord(s.rssi) + ')'],
       ['Adafruit IO', (s.mqtt ? 'Connected' : 'Not connected') + (s.tls ? ', encrypted' : ', unencrypted')],
+      ['Alexa', s.alexa ? '"' + s.alexa + '"' : 'Off'],
       ['Free memory', Math.round(s.heap / 1024) + ' KB'],
       ['Firmware', 'v' + s.version + ', up ' + s.uptime]
     ];

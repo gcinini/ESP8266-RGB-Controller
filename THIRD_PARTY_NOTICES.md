@@ -13,6 +13,7 @@ this file with it.
 |---|---|---|
 | [FastLED](https://github.com/FastLED/FastLED) | Driving the LED strip, colour palettes | MIT |
 | [PubSubClient](https://github.com/knolleary/pubsubclient) | MQTT connection to Adafruit IO | MIT |
+| [Espalexa](https://github.com/Aircoookie/Espalexa) | Local Alexa control (Philips Hue emulation) | MIT |
 | [ESP8266 Arduino core](https://github.com/esp8266/Arduino) | Wi-Fi, web server, OTA updates, EEPROM | LGPL 2.1 (with bundled components under their own licenses, including Espressif's NONOS SDK under the Espressif MIT License) |
 
 ---
@@ -65,6 +66,32 @@ NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
 LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+## Espalexa
+
+```
+MIT License
+
+Copyright (c) 2017 Christian Schwinne
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ## ESP8266 Arduino core

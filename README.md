@@ -1,12 +1,13 @@
 # ESP8266 RGB Controller
 
-Wi-Fi firmware for a WS2812B LED lamp built on a Wemos D1 Mini (ESP8266). You control it from a web page on your network or remotely through Adafruit IO (MQTT).
+Wi-Fi firmware for a WS2812B LED lamp built on a Wemos D1 Mini (ESP8266). You control it from a web page on your network, by voice with an Amazon Echo (Alexa), or remotely through Adafruit IO (MQTT).
 
 ## Features
 
 - **Web page** served by the lamp itself, works on phones and desktops: power, colour (using the browser's own colour picker), brightness, mode and palette.
 - **Modes:** solid colour, colour fade, rainbow, random (a different palette every few seconds), palette modes with smooth or stepped blending, and a flickering candle.
 - **Palettes:** Cloud, Ocean, Party, Heat, Forest, Lava.
+- **Alexa voice control**, directly over your home network: no Alexa skill, account linking or cloud service needed. The lamp appears in the Alexa app as a colour bulb.
 - **Adafruit IO control** over encrypted MQTT (TLS, port 8883) for every mode and palette, including colour names (`Hot Pink`) or hex values (`#FF8800`), plus a status report (mode, colour, Wi-Fi, IP address, uptime).
 - **Remembers its settings.** Colour, brightness, mode and palette are restored after a power cut.
 - **Over-the-air (OTA) updates** over Wi-Fi, optionally password protected.
@@ -17,7 +18,7 @@ Wi-Fi firmware for a WS2812B LED lamp built on a Wemos D1 Mini (ESP8266). You co
 ```
 ESP8266-RGB-Web-Server/          the sketch (open this folder in the Arduino IDE)
 ├── ESP8266-RGB-Web-Server.ino   firmware, with comments explaining how it works
-├── config.h                     settings for each lamp (LED count, pin, name, feed group...)
+├── config.h                     settings for each lamp (LED count, pin, names, feed group...)
 ├── web_page.h                   the web interface (HTML/CSS/JS stored in flash)
 ├── mqtt_roots.h                 root certificates trusted for the encrypted Adafruit IO connection
 ├── secrets.example.h            template for your credentials
@@ -36,7 +37,7 @@ THIRD_PARTY_NOTICES.md           licenses of the libraries compiled into the fir
 | Number of LEDs | 35 | `LED_COUNT` |
 | Data pin | D4 | `LED_PIN` |
 | LEDs used by Candle mode | 14, counted from LED 0 | `CANDLE_LEDS`, `CANDLE_AT_LED_ZERO` |
-| Power limit | off | `MAX_MILLIAMPS` |
+| Power limit | 2000 mA | `MAX_MILLIAMPS` |
 
 Each WS2812B LED can draw about 60 mA at full white, so 35 LEDs can need over 2 A. If your power supply is smaller, set `MAX_MILLIAMPS` to what it can deliver (for example `1500` for a 2 A supply) and the lamp dims itself just enough to stay under it.
 
@@ -54,12 +55,13 @@ All the settings you might change for a particular lamp are in **`ESP8266-RGB-We
 | `LED_COUNT`, `LED_PIN`, `LED_TYPE`, `LED_ORDER` | The LED strip |
 | `CANDLE_LEDS`, `CANDLE_AT_LED_ZERO` | Size and position of the Candle mode flame |
 | `FEED_GROUP` | Adafruit IO feed group (`espweb` for lamp 1) |
+| `ALEXA_NAME` | The name you say to Alexa (`Lightbox` for lamp 1). Must be unique per lamp |
 
-Below the lamp blocks are settings shared by every lamp: power limit, starting colour and brightness, animation speed, and Adafruit IO and NTP servers.
+Below the lamp blocks are settings shared by every lamp: power limit, starting colour and brightness, animation speed, Alexa on/off (`ENABLE_ALEXA`), and Adafruit IO and NTP servers.
 
 ### More than one lamp
 
-1. In `config.h`, fill in the `LAMP_ID == 2` block: a different `DEVICE_NAME`, its LED count, and its own `FEED_GROUP`, for example `lamp2`.
+1. In `config.h`, fill in the `LAMP_ID == 2` block: a different `DEVICE_NAME` and `ALEXA_NAME`, its LED count, and its own `FEED_GROUP`, for example `lamp2`.
 2. **PlatformIO:** in `platformio.ini`, remove the `;` from the `lamp2_usb` and `lamp2_ota` sections and set lamp 2's IP address. Then upload with `pio run -e lamp2_usb -t upload` (first time) or `pio run -e lamp2_ota -t upload`.
    **Arduino IDE:** change `#define LAMP_ID 1` at the top of `config.h` to `2` before uploading to lamp 2, and back to `1` for lamp 1.
 3. On Adafruit IO, make a dashboard for the new feed group (`lamp2.onoff`, `lamp2.button` and so on). Each lamp uses 5 feeds, and the free plan allows 10, so two lamps fit exactly.
@@ -87,7 +89,7 @@ Open the repo folder in VS Code. PlatformIO downloads the board package and the 
 
 1. In **File → Preferences → Additional boards manager URLs**, add `https://arduino.esp8266.com/stable/package_esp8266com_index.json`.
 2. In **Boards Manager**, install **esp8266** and select **LOLIN(WEMOS) D1 R2 & mini**. Under **Tools → CPU Frequency**, choose **160 MHz** (PlatformIO does this automatically).
-3. In **Library Manager**, install **FastLED** and **PubSubClient** (by Nick O'Leary).
+3. In **Library Manager**, install **FastLED**, **PubSubClient** (by Nick O'Leary) and **Espalexa** (by Christian Schwinne).
 4. Open `ESP8266-RGB-Web-Server/ESP8266-RGB-Web-Server.ino` and upload it.
 
 There's nothing else to upload: the web page is part of the firmware.
@@ -125,8 +127,9 @@ Brightness: 40%
 Wi-Fi: gc-dev (-63 dBm)
 IP: 192.168.30.30
 Host: ESP-lightbox1.local
+Alexa name: Lightbox
 Adafruit IO: encrypted (TLS)
-Firmware: v3.4.1, up 2h 05m
+Firmware: v3.5.0, up 2h 05m
 ```
 
 If the lamp loses its connection, the report simply stops updating, so check the block's timestamp to see how fresh it is.
@@ -148,13 +151,45 @@ Leave each button's **release value** empty. Otherwise every press sends a secon
 
 The dashboard's controls don't move by themselves when you change the lamp from the web page. The status block is the place to see what the lamp is actually doing.
 
+### Alexa
+
+The lamp pretends to be a Philips Hue colour bulb (using the [Espalexa](https://github.com/Aircoookie/Espalexa) library), so an Amazon Echo finds it and controls it **directly over your home network**. There's no Alexa skill to enable and no cloud service in between, so it keeps working even when Adafruit IO or the internet is down. (IFTTT's Alexa triggers, the old way to link Adafruit IO to Alexa, were shut down in 2023.)
+
+**Setting it up**
+
+1. Choose the name in `config.h` with `ALEXA_NAME` (`Lightbox` for lamp 1). Pick something Alexa hears easily and that no other device uses.
+2. Upload the firmware. The serial monitor shows `Alexa: ready as "Lightbox"`.
+3. Say **"Alexa, discover devices"** (or in the Alexa app: **Devices → + → Add Device → Other → Discover devices**). After about 45 seconds, Alexa reports a new light.
+
+**What you can say**
+
+| Say | The lamp |
+|---|---|
+| "Alexa, turn on the Lightbox" / "turn off" | switches on in its last mode (Candle, Rainbow…), or off |
+| "Alexa, set the Lightbox to 40%" | sets the brightness |
+| "Alexa, brighten / dim the Lightbox" | changes the brightness |
+| "Alexa, set the Lightbox to blue" (or pink, purple, white…) | Solid colour mode in that colour |
+
+Modes and palettes aren't available by voice, because a Hue bulb has no such setting. You can still put the lamp in a group or a routine in the Alexa app, like any other light. Changes made from the web page or Adafruit IO show up in the Alexa app.
+
+**Requirements and troubleshooting**
+
+- **The Echo and the lamp must be on the same network (VLAN / subnet).** Discovery uses a multicast search (SSDP, UDP 1900) that routers don't pass between networks. After discovery, the Echo sends commands to the lamp's web server on TCP port 80.
+- **Client isolation must be off** on that Wi-Fi network (it may be called "AP isolation" or, on MikroTik, "client-to-client forwarding"). With it on, the Echo can't reach the lamp at all.
+- **Which Echo:** first-generation Echos and the Echo Dot 2 are the most reliable at finding emulated Hue bulbs. Some newer Echos find them only now and then, or not at all. Discovering again sometimes helps.
+- **Discovery finds nothing?** Open `http://<lamp IP>/espalexa` in a browser. It lists the device the lamp is offering. If that page loads but discovery still fails, check the two points above.
+- **Renamed the lamp?** In the Alexa app, delete the old device and discover again.
+- **Turning it off:** set `ENABLE_ALEXA` to `0` in `config.h`. The firmware is then smaller too.
+
 ### Web API
 
-Every endpoint is a plain GET request and answers with the current state as JSON, so you can also script the lamp or connect it to Home Assistant:
+The `/espalexa` and `/description.xml` pages, and requests under `/api`, belong to the Alexa support described above.
+
+Every other endpoint is a plain GET request and answers with the current state as JSON, so you can also script the lamp or connect it to Home Assistant:
 
 | Endpoint | Example |
 |---|---|
-| `/state` | `{"on":true,"mode":3,"palette":1,"brightness":128,"colour":"#ffb46b","palettes":[...],"host":"ESP-lightbox1","ip":"192.168.20.57","rssi":-63,"mqtt":true,"version":"3.2.0","uptime":"2h 05m"}` |
+| `/state` | `{"on":true,"mode":3,"palette":1,"brightness":128,"colour":"#ffb46b","palettes":[...],"host":"ESP-lightbox1","ip":"192.168.30.30","rssi":-63,"mqtt":true,"tls":true,"heap":21000,"alexa":"Lightbox","version":"3.5.0","uptime":"2h 05m"}` |
 | `/power?on=1` or `?on=0` | turn on or off |
 | `/colour?hex=ff8800` | solid colour (a colour name also works) |
 | `/brightness?value=1-255` | brightness |
@@ -198,6 +233,7 @@ A successful upload prints `Sending invitation`, `Waiting for device...`, then `
 - **Credentials stay out of git.** Wi-Fi and Adafruit IO details live only in `secrets.h`, which is git-ignored.
 - **Don't publish compiled firmware.** A `firmware.bin` built from your `secrets.h` contains those credentials in readable form, so releases contain source code only.
 - **Adafruit IO traffic is encrypted** (TLS on port 8883), and the server's certificate is checked.
+- **Anyone on the lamp's network can control it,** through the web page, the web API or the Alexa (Hue) interface. None of these ask for a password, so keep the lamp on a network you trust, such as a separate IoT VLAN.
 - **OTA has no password by default.** Set `OTA_PASSWORD` (see above) if other people or devices share the lamp's network.
 - **Older versions of this repository contained credentials in the code.** Those values were changed and then removed from the entire git history on 2026-11-04, so older tags now show `***REMOVED***` in their place.
 
@@ -211,6 +247,7 @@ git checkout v3.0.4
 
 | Version | Highlights |
 |---|---|
+| 3.5.0 | Local Alexa control (Hue bulb emulation with Espalexa): on/off, brightness and colour by voice; Alexa name on the web page and status report |
 | 3.4.1 | Settings moved to `config.h`, with support for several lamps; optional power limit; web page shows the lamp's name; code comments written for beginners |
 | 3.3.0 | Encrypted Adafruit IO connection (TLS, port 8883) with root-certificate checking |
 | 3.2.0 | Candle mode; status report to Adafruit IO; every mode and palette controllable over MQTT; Network section on the web page; OTA across VLANs |
@@ -228,7 +265,8 @@ The sketch is commented for people learning C and C++, with an explanation the f
 2. **`lampChanged()`** (section 4): every change goes through it.
 3. **`drawFrame()`** (section 6): the non-blocking timer, and how a frame is drawn.
 4. **`onMqttMessage()`** (section 8): how an Adafruit IO message becomes a change.
-5. **`startWebServer()`** (section 9), and the JavaScript in `web_page.h`: how the web page talks to the lamp.
+5. **`startWebServer()`** (section 10), and the JavaScript in `web_page.h`: how the web page talks to the lamp.
+6. **`onAlexaCommand()`** (section 9): how a voice command becomes the same kind of change.
 
 Then try small changes, such as the colour of the candle flame in `drawCandle()` or a new name in `COLOUR_NAMES`, and upload them over OTA.
 
@@ -240,6 +278,7 @@ This project is released under the [MIT License](LICENSE). The libraries compile
 
 - [FastLED](https://fastled.io/)
 - [PubSubClient](https://github.com/knolleary/pubsubclient)
+- [Espalexa](https://github.com/Aircoookie/Espalexa)
 - [ESP8266 core for Arduino](https://github.com/esp8266/Arduino)
 - [Adafruit IO](https://io.adafruit.com/)
 
