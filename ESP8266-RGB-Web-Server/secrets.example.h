@@ -3,9 +3,9 @@
 // Copy this file to secrets.h (same folder) and fill in real values.
 // secrets.h is listed in .gitignore, so it never gets committed.
 //
-// Only passwords and keys go here. Everything else you might change when
-// setting up a lamp (LED count, pin, name...) is in config.h. If you have
-// several lamps on the same Wi-Fi and Adafruit IO account, they all share
+// Only passwords go here. Everything else you might change when setting up
+// a lamp (LED count, pin, names, the broker's address...) is in config.h.
+// If you have several lamps on the same Wi-Fi and broker, they can all share
 // this one secrets.h.
 
 #pragma once
@@ -14,15 +14,12 @@
 #define WIFI_SSID      "your-wifi-ssid"
 #define WIFI_PASSWORD  "your-wifi-password"
 
-// Adafruit IO (MQTT) - username and "Active Key" from io.adafruit.com
-#define MQTT_USER      "your-adafruit-io-username"
-#define MQTT_KEY       "your-adafruit-io-key"
+// Login for your MQTT broker (Mosquitto), created with mosquitto_passwd -
+// see "Home Assistant" in README.md. Give the lamp its own user rather than
+// reusing Home Assistant's.
+#define MQTT_USER      "bedlight"
+#define MQTT_PASSWORD  "your-mqtt-password"
 
 // Optional: password for over-the-air updates. If you set one, PlatformIO needs
 // it too - see the OTA section of README.md.
 // #define OTA_PASSWORD   "choose-an-ota-password"
-
-// Optional: set to 0 to use unencrypted MQTT on port 1883 instead of TLS on 8883.
-// Only do this if the encrypted connection can't work - the Adafruit IO key is
-// then sent in clear.
-// #define MQTT_USE_TLS   0

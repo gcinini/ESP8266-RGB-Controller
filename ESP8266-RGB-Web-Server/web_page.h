@@ -9,7 +9,7 @@
 // on the ESP8266. It talks to the lamp through small addresses that answer
 // with JSON (see section 10 of the sketch):
 //   /state, /power, /colour, /brightness, /mode, /palette
-// It asks /state every few seconds, so changes made through Adafruit IO show up too.
+// It asks /state every few seconds, so changes made by Alexa or Home Assistant show up too.
 // Colour selection uses the browser's built-in <input type="color"> picker.
 //
 // Two C++ details make this work:
@@ -140,8 +140,8 @@ static const char WEB_PAGE[] PROGMEM = R"page(<!doctype html>
   // Updates every control from the lamp's state (the JSON object `s`).
   function render(s) {
     // Show this lamp's own name, so two lamps are easy to tell apart
-    el('name').textContent = s.host;
-    document.title = s.host;
+    el('name').textContent = s.name;
+    document.title = s.name;
 
     if (!paletteNames) {
       paletteNames = s.palettes;
@@ -167,7 +167,7 @@ static const char WEB_PAGE[] PROGMEM = R"page(<!doctype html>
     const rows = [
       ['Address', s.host + '.local \u00b7 ' + s.ip],
       ['Wi-Fi', s.rssi + ' dBm (' + signalWord(s.rssi) + ')'],
-      ['Adafruit IO', (s.mqtt ? 'Connected' : 'Not connected') + (s.tls ? ', encrypted' : ', unencrypted')],
+      ['Home Assistant', (s.mqtt ? 'Connected' : 'Not connected') + ' to MQTT broker ' + s.broker],
       ['Alexa', s.alexa ? '"' + s.alexa + '"' : 'Off'],
       ['Free memory', Math.round(s.heap / 1024) + ' KB'],
       ['Firmware', 'v' + s.version + ', up ' + s.uptime]

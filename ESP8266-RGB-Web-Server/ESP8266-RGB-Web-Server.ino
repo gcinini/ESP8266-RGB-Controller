@@ -1,9 +1,9 @@
 /*
-  ESP8266 RGB Controller  v3.5.0
+  ESP8266 RGB Controller  v4.0.0
 
   Wi-Fi controller for a WS2812B LED lamp on a Wemos D1 Mini (ESP8266).
   Control it from its own web page, by voice through an Amazon Echo (Alexa),
-  or through Adafruit IO (MQTT).
+  or from Home Assistant (over MQTT, with automatic discovery).
 
   Copyright (c) 2019-2026 G Cinini
   SPDX-License-Identifier: MIT
@@ -29,7 +29,7 @@
     5. Colours                            (turning "Hot Pink" or "#FF8800" into RGB)
     6. Drawing                            (turning the state into LED colours)
     7. Saving settings                    (so the lamp remembers after a power cut)
-    8. Wi-Fi, OTA and Adafruit IO         (networking)
+    8. Wi-Fi, OTA and Home Assistant     (networking)
     9. Alexa                              (voice control through an Echo)
    10. Web interface                      (the web page and its small API)
 
@@ -37,7 +37,7 @@
   ------------
   A microcontroller can only do one thing at a time. If the code waited
   (with delay()) for an animation to finish, the lamp could not answer the
-  web page or Adafruit IO in the meantime.
+  web page or Home Assistant in the meantime.
 
   So nothing here ever waits for long. Instead:
     * web requests, Alexa commands and MQTT messages only CHANGE THE STATE
@@ -49,8 +49,8 @@
 
   WHERE THE SETTINGS ARE
   ----------------------
-    config.h    LED count, pin, device name, feed group... (one block per lamp)
-    secrets.h   Wi-Fi and Adafruit IO passwords (not on GitHub)
+    config.h    LED count, pin, names, MQTT broker... (one block per lamp)
+    secrets.h   Wi-Fi and MQTT broker passwords (not on GitHub)
 */
 
 
@@ -62,12 +62,11 @@
 // this sketch's own folder.
 
 #include <ESP8266WiFi.h>        // joining a Wi-Fi network
-#include <WiFiClientSecure.h>   // encrypted (TLS) network connections
 #include <ESP8266WebServer.h>   // serving the web page
 #include <ArduinoOTA.h>         // receiving firmware updates over Wi-Fi
 #include <EEPROM.h>             // saving settings so they survive a power cut
-#include <PubSubClient.h>       // MQTT, the messaging protocol Adafruit IO uses
-#include <time.h>               // the clock (needed to check certificate dates)
+#include <PubSubClient.h>       // MQTT, the messaging system Home Assistant listens on
+#include <ArduinoJson.h>        // reading and writing JSON, the text format Home Assistant uses
 
 // Espalexa makes the lamp look like a Philips Hue bulb to an Amazon Echo.
 // It keeps a table of devices; this lamp is one device, so reserve room for
@@ -82,7 +81,7 @@
 #include <FastLED.h>            // driving the LED strip
 
 // secrets.h is included before config.h, so secrets.h can override settings
-// such as MQTT_USE_TLS. __has_include checks whether the file exists, so a
+// such as ENABLE_ALEXA. __has_include checks whether the file exists, so a
 // missing secrets.h gives a clear message instead of a confusing error.
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -90,24 +89,19 @@
 #error "secrets.h not found: copy secrets.example.h to secrets.h and fill in your credentials"
 #endif
 
+// `defined(X)` is true if X has been #defined. Version 3 used MQTT_KEY for the
+// Adafruit IO key; version 4 needs a login for your own MQTT broker instead.
+#if !defined(MQTT_USER) || !defined(MQTT_PASSWORD)
+#error "secrets.h needs MQTT_USER and MQTT_PASSWORD for your MQTT broker (see secrets.example.h)"
+#endif
+
 #include "config.h"             // this lamp's settings
 #include "web_page.h"           // the web page (HTML, CSS and JavaScript as one text)
-#include "mqtt_roots.h"         // certificates trusted for the encrypted connection
 
 // A `const` variable can't be changed after it is created. The compiler
 // stops you if you try. `const char *` is a pointer to text: in C, text is
 // stored as a row of characters, and the variable holds where it starts.
-const char *FIRMWARE_VERSION = "3.5.0";
-
-#if MQTT_USE_TLS
-const uint16_t MQTT_PORT = 8883;   // encrypted MQTT
-#else
-const uint16_t MQTT_PORT = 1883;   // unencrypted MQTT
-#endif
-
-// A clock reading earlier than this means "not set yet" (the ESP8266 starts
-// counting from 1 January 1970). 1704067200 seconds = 1 January 2024.
-const time_t CLOCK_VALID_AFTER = 1704067200;
+const char *FIRMWARE_VERSION = "4.0.0";
 
 
 // ===========================================================================
@@ -136,26 +130,17 @@ const uint8_t MODE_MAX = MODE_CANDLE;
 // An array is a numbered list. MODE_NAMES[3] is "Rainbow". Index 0 is
 // unused, so the index matches the mode number. `const char *const` means
 // neither the list nor the text in it can be changed.
+// Home Assistant shows these names in its Effect list, and sends one back to
+// choose a mode, so changing a name here changes it there too.
 const char *const MODE_NAMES[] = {
   "", "Solid colour", "Colour fade", "Rainbow", "Random", "Palette, smooth", "Palette, stepped", "Candle"
-};
-
-// A struct groups several values into one new type, like a row in a table.
-// This one pairs a word that Adafruit IO can send with the mode it selects.
-struct ModeWord {
-  const char *word;
-  uint8_t mode;
-};
-const ModeWord MODE_WORDS[] = {
-  { "solid", MODE_SOLID },   { "fade", MODE_FADE },               { "rainbow", MODE_RAINBOW },
-  { "random", MODE_RANDOM }, { "smooth", MODE_PALETTE_SMOOTH },   { "palette", MODE_PALETTE_SMOOTH },
-  { "stepped", MODE_PALETTE_STEPPED },                            { "candle", MODE_CANDLE },
 };
 
 // --- Palettes -----------------------------------------------------------------
 // A palette is a list of 16 colours that FastLED blends between. CloudColors_p
 // and friends are built into FastLED. The `&` takes the *address* of each
 // palette, so the table stores where the palette is rather than a copy of it.
+// A struct groups several values into one new type, like a row in a table.
 struct NamedPalette {
   const char *name;
   const TProgmemRGBPalette16 *colours;   // `*` = pointer to (address of) a palette
@@ -199,12 +184,7 @@ uint8_t       animationPhase = 0;     // how far an animation has moved; wraps 2
 // These are *objects*, a C++ idea: a variable that carries its own functions
 // (called methods), used like web.send(...) or mqtt.connect(...).
 ESP8266WebServer web(80);             // web server on port 80, the normal HTTP port
-#if MQTT_USE_TLS
-BearSSL::WiFiClientSecure mqttSocket;                     // encrypted network connection
-BearSSL::X509List         mqttTrustedRoots(MQTT_ROOT_CERTS);  // certificates we trust
-#else
-WiFiClient                mqttSocket;                     // plain network connection
-#endif
+WiFiClient       mqttSocket;          // a network connection (TCP) for MQTT to use
 PubSubClient     mqtt(mqttSocket);    // MQTT client that talks over mqttSocket
 
 #if ENABLE_ALEXA
@@ -214,16 +194,29 @@ Espalexa         espalexa;            // answers the Echo's searches and command
 EspalexaDevice  *alexaLight = nullptr;
 #endif
 
-// Adafruit IO "topics" - the addresses of the feeds - built in setup().
-// String is a C++ class for text that can grow; it is easier than C text but
-// uses more memory, so this sketch uses it only where it helps.
-String topicPower, topicColour, topicBrightness, topicButton, topicStatus;
+// MQTT "topics" - the addresses messages are sent to - built in setup()
+// from MQTT_TOPIC, e.g. "bedlight/state". String is a C++ class for text
+// that can grow; it is easier than C text but uses more memory, so this
+// sketch uses it only where it helps.
+String topicState;          // <topic>/state         lamp -> Home Assistant: what the lamp is doing
+String topicSet;            // <topic>/set           Home Assistant -> lamp: light commands
+String topicPaletteSet;     // <topic>/palette/set   Home Assistant -> lamp: choose a palette
+String topicAvailability;   // <topic>/availability  "online" or "offline"
+// Two pieces of text written side by side are joined into one by the
+// compiler, so this is "homeassistant/status". Home Assistant says "online"
+// there whenever it starts.
+const char *HA_STATUS_TOPIC = HA_DISCOVERY_PREFIX "/status";
 
-// Bookkeeping for the delayed jobs (saving, status reports).
-bool     savePending = false;     // true = settings changed and need saving
-uint32_t lastChangeAt = 0;        // millis() when the lamp last changed
-bool     statusPending = true;    // true = Adafruit IO should get a status report
-uint32_t lastStatusAt = 0;        // millis() of the last report (0 = never)
+// A name unique to this lamp's chip, e.g. "bedlight_a1b2c3", so Home
+// Assistant can tell it apart from every other device. Filled in by setup().
+char deviceId[32];          // a C text buffer: room for 31 characters plus the end marker
+
+// Bookkeeping for the delayed jobs (saving, reports to Home Assistant).
+bool     savePending = false;       // true = settings changed and need saving
+uint32_t lastChangeAt = 0;          // millis() when the lamp last changed
+bool     statePending = true;       // true = Home Assistant should get a state report
+uint32_t lastStateAt = 0;           // millis() of the last report (0 = never)
+bool     discoveryPending = false;  // true = announce the lamp to Home Assistant
 
 
 // ===========================================================================
@@ -233,7 +226,7 @@ uint32_t lastStatusAt = 0;        // millis() of the last report (0 = never)
 // compiler each function's name, inputs and result, so the functions can be
 // written in any order below. `void` means "returns nothing".
 
-// Lamp control (used by both the web page and Adafruit IO)
+// Lamp control (used by the web page, Alexa and Home Assistant)
 void setPower(bool on);
 void setMode(uint8_t mode);
 void setPalette(uint8_t id);
@@ -249,10 +242,8 @@ void drawPaletteAlongStrip();
 void drawCandle();
 void pickRandomPalette();
 
-// Status reports
-String statusText();
+// Status
 String uptimeText();
-void publishStatusIfDue();
 
 // Settings in flash
 void loadSettings();
@@ -261,10 +252,14 @@ void saveSettingsIfDue();
 // Networking
 void connectWiFi();
 void startOta();
-bool clockIsSet();
-void prepareMqttSocket();
 void serviceMqtt();
 void onMqttMessage(char *topic, byte *payload, unsigned int length);
+void handleLightCommand(byte *payload, unsigned int length);
+bool publishJson(const String &topic, JsonDocument &doc);
+void addDeviceInfo(JsonDocument &doc);
+void publishDiscovery();
+void publishState();
+void publishToHomeAssistantIfDue();
 
 // Alexa
 void startAlexa();
@@ -299,21 +294,21 @@ void setup() {
 
   loadSettings();   // restore the last state, so the lamp lights up straight away
   connectWiFi();    // waits for Wi-Fi, but keeps animating while it waits
-  configTime(0, 0, NTP_SERVER_1, NTP_SERVER_2);   // start setting the clock (UTC) in the background
   startOta();
   startWebServer();
 
-  // Build the Adafruit IO feed addresses, e.g. "gcinini/feeds/espweb.onoff".
-  // Adding Strings with + joins them together.
-  String feeds = String(MQTT_USER) + "/feeds/" + FEED_GROUP;
-  topicPower      = feeds + ".onoff";
-  topicColour     = feeds + ".color";
-  topicBrightness = feeds + ".brightness";
-  topicButton     = feeds + ".button";
-  topicStatus     = feeds + ".outtopic";
+  // ESP.getChipId() is a number burned into every ESP8266 chip. %06x prints
+  // it as 6 hexadecimal digits, so deviceId becomes e.g. "bedlight_a1b2c3".
+  snprintf(deviceId, sizeof(deviceId), "%s_%06x", MQTT_TOPIC, ESP.getChipId());
+
+  // Build the MQTT topics. Adding Strings with + joins them together.
+  topicState        = String(MQTT_TOPIC) + "/state";
+  topicSet          = String(MQTT_TOPIC) + "/set";
+  topicPaletteSet   = String(MQTT_TOPIC) + "/palette/set";
+  topicAvailability = String(MQTT_TOPIC) + "/availability";
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setCallback(onMqttMessage);   // "call onMqttMessage() whenever a message arrives"
-  mqtt.setBufferSize(512);           // room for the status report (the default is 256 bytes)
+  mqtt.setBufferSize(512);           // largest message we can receive (Home Assistant's commands are small)
 }
 
 // Each of these returns almost immediately. That's what keeps the lamp
@@ -325,10 +320,10 @@ void loop() {
 #else
   web.handleClient();      // has the web page sent a request?
 #endif
-  serviceMqtt();           // any Adafruit IO messages? reconnect if needed
+  serviceMqtt();           // any Home Assistant messages? reconnect if needed
   drawFrame();             // draw the next animation frame, if it's time
   saveSettingsIfDue();     // save settings, if it's time
-  publishStatusIfDue();    // send a status report, if it's time
+  publishToHomeAssistantIfDue();   // announce the lamp or report its state, if it's time
 }
 
 
@@ -336,7 +331,7 @@ void loop() {
 // 4. Lamp control
 // ===========================================================================
 // Every change to the lamp goes through one of these functions, whether it
-// came from the web page or from Adafruit IO. Each one updates `lamp`, prints
+// came from the web page, Alexa or Home Assistant. Each one updates `lamp`, prints
 // a line to the serial monitor, and calls lampChanged().
 
 void setPower(bool on) {
@@ -394,9 +389,9 @@ void lampChanged() {
   syncAlexa();   // so the Alexa app shows what the lamp is really doing
 
   // Don't save or report right now. Just note that it needs doing; loop()
-  // does it a moment later (see saveSettingsIfDue and publishStatusIfDue).
+  // does it a moment later (see saveSettingsIfDue and publishToHomeAssistantIfDue).
   savePending = true;
-  statusPending = true;
+  statePending = true;
   lastChangeAt = millis();   // millis() = milliseconds since the board started
 }
 
@@ -687,7 +682,7 @@ void saveSettingsIfDue() {
 
 
 // ===========================================================================
-// 8. Wi-Fi, OTA and Adafruit IO
+// 8. Wi-Fi, OTA and Home Assistant
 // ===========================================================================
 void connectWiFi() {
   WiFi.mode(WIFI_STA);          // STA = "station": join a network (not create one)
@@ -721,91 +716,78 @@ void startOta() {
   ArduinoOTA.onStart([]() {
     Serial.println("OTA update starting");
     FastLED.clear(true);   // LEDs off while flashing
+    // Tell Home Assistant straight away, rather than after the connection times out.
+    if (mqtt.connected()) mqtt.publish(topicAvailability.c_str(), "offline", true);
   });
   ArduinoOTA.onEnd([]() { Serial.println("OTA update finished - restarting"); });
   ArduinoOTA.onError([](ota_error_t error) { Serial.printf("OTA update failed, error %u\n", error); });
   ArduinoOTA.begin();
 }
 
-bool clockIsSet() {
-  // time(nullptr) returns the current time in seconds since 1 January 1970.
-  return time(nullptr) > CLOCK_VALID_AFTER;
-}
+// ---------------------------------------------------------------------------
+// Home Assistant over MQTT
+// ---------------------------------------------------------------------------
+// MQTT is a messaging system. Devices connect to one central program, the
+// *broker* (here Mosquitto, on the Pi5), and either *publish* messages to a
+// named *topic* ("bedlight/state") or *subscribe* to topics to receive them.
+// The lamp and Home Assistant never talk directly - both talk to the broker.
+//
+//   Topic                          Direction           Contents
+//   bedlight/set                   HA -> lamp          {"state":"ON","brightness":128,...}
+//   bedlight/palette/set           HA -> lamp          Ocean
+//   bedlight/state                 lamp -> HA          {"state":"ON","effect":"Candle",...}
+//   bedlight/availability          lamp -> HA          online / offline
+//   homeassistant/status           HA -> lamp          online (when HA starts)
+//   homeassistant/<type>/.../config  lamp -> HA        "discovery": what the lamp is
+//
+// Discovery is what makes the lamp appear in Home Assistant by itself. The
+// lamp publishes a description of each thing it offers (a light, a palette
+// selector and two diagnostic sensors), and Home Assistant creates them.
+//
+// Messages can be *retained*: the broker keeps the last one on each topic
+// and hands it to anyone who subscribes later. Discovery, state and
+// availability are retained, so Home Assistant knows about the lamp even if
+// it starts after the lamp does.
 
-// Sets up the encrypted connection once: which certificates to trust, and the
-// smallest TLS buffers the server allows (saves RAM on the ESP8266).
-void prepareMqttSocket() {
-#if MQTT_USE_TLS
-  static bool prepared = false;
-  if (prepared) return;
-  prepared = true;
-
-  mqttSocket.setTrustAnchors(&mqttTrustedRoots);
-  // :: reaches inside a class. probeMaxFragmentLength asks the server whether
-  // it accepts small 1 KB message pieces instead of the standard 16 KB.
-  if (BearSSL::WiFiClientSecure::probeMaxFragmentLength(MQTT_HOST, MQTT_PORT, 1024)) {
-    mqttSocket.setBufferSizes(1024, 1024);
-    Serial.println("Adafruit IO: server supports small TLS buffers (1 KB)");
-  } else {
-    Serial.println("Adafruit IO: using standard TLS buffers (16 KB)");
-  }
-#endif
-}
-
-// Keeps the Adafruit IO connection alive. When it is down, reconnect attempts
-// start every MQTT_RETRY_MS and back off to once a minute if they keep failing
-// (each encrypted attempt pauses the lamp for a second or two). The lamp and
-// the web page keep working in between.
+// Keeps the MQTT connection alive. When it is down, reconnect attempts start
+// every MQTT_RETRY_MS and back off to once a minute if they keep failing.
+// The lamp, the web page and Alexa keep working in between.
 void serviceMqtt() {
   if (mqtt.connected()) {
     mqtt.loop();   // receive messages (which calls onMqttMessage) and keep the connection alive
     return;
   }
 
+  // `static` variables inside a function keep their value between calls
+  // (a normal local variable would start again from scratch every time).
   static uint32_t lastAttemptAt = 0;
   static uint32_t retryDelay = 0;          // 0 = try straight away
   if (millis() - lastAttemptAt < retryDelay) return;
   if (WiFi.status() != WL_CONNECTED) return;
-
-#if MQTT_USE_TLS
-  static bool waitingForClock = false;
-  if (!clockIsSet()) {                     // certificate dates can't be checked yet
-    if (!waitingForClock) Serial.println("Adafruit IO: waiting for the clock to be set by NTP");
-    waitingForClock = true;
-    return;
-  }
-  if (waitingForClock) Serial.println("Adafruit IO: clock set");
-  waitingForClock = false;
-  prepareMqttSocket();
-  mqttSocket.setX509Time(time(nullptr));   // tell the certificate checker today's date
-#endif
-
   lastAttemptAt = millis();
-  // The client ID must be unique on Adafruit IO, so add the chip's serial number.
-  String clientId = String(DEVICE_NAME) + "-" + String(ESP.getChipId(), HEX);
-  Serial.printf("Adafruit IO: connecting to %s:%u%s... ", MQTT_HOST, MQTT_PORT, MQTT_USE_TLS ? " (TLS)" : "");
-  if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_KEY)) {
-    Serial.printf("connected (free memory %u bytes)\n", ESP.getFreeHeap());
+
+  Serial.printf("MQTT: connecting to %s:%u as %s... ", MQTT_HOST, MQTT_PORT, MQTT_USER);
+  // The last three values are the "last will": if the lamp disappears without
+  // saying goodbye (power cut, crash), the broker publishes "offline" to the
+  // availability topic on its behalf, and Home Assistant greys the lamp out.
+  //   connect(client ID, user, password, will topic, will QoS, will retained, will message)
+  if (mqtt.connect(deviceId, MQTT_USER, MQTT_PASSWORD,
+                   topicAvailability.c_str(), 0, true, "offline")) {
+    Serial.println("connected");
     // .c_str() turns a String into plain C text, which the library expects.
-    mqtt.subscribe(topicPower.c_str());
-    mqtt.subscribe(topicColour.c_str());
-    mqtt.subscribe(topicBrightness.c_str());
-    mqtt.subscribe(topicButton.c_str());
-    statusPending = true;   // report the current state straight away
-    lastStatusAt = 0;
+    mqtt.subscribe(topicSet.c_str());
+    mqtt.subscribe(topicPaletteSet.c_str());
+    mqtt.subscribe(HA_STATUS_TOPIC);
+    mqtt.publish(topicAvailability.c_str(), "online", true);   // true = retained
+    discoveryPending = true;   // (re)announce the lamp...
+    statePending = true;       // ...and report its state, from loop()
     retryDelay = MQTT_RETRY_MS;
     return;
   }
 
+  // mqtt.state() says why: -2 = broker not reachable (wrong address, or a
+  // firewall in the way), 4 = wrong user or password, 5 = not authorised.
   Serial.printf("failed (state %d)\n", mqtt.state());   // %d = whole number that may be negative
-#if MQTT_USE_TLS
-  char reason[80];   // a C text buffer: room for 79 characters plus the end marker
-  int sslError = mqttSocket.getLastSSLError(reason, sizeof(reason));
-  if (sslError != 0) {
-    Serial.printf("  TLS error %d: %s\n", sslError, reason);
-    Serial.println("  (a certificate error usually means Adafruit IO changed certificate authority - see mqtt_roots.h)");
-  }
-#endif
   // Back off: wait longer after each failure, up to a minute.
   if (retryDelay == 0)          retryDelay = MQTT_RETRY_MS;
   else if (retryDelay < 30000)  retryDelay *= 2;   // *= doubles it: retryDelay = retryDelay * 2
@@ -813,81 +795,245 @@ void serviceMqtt() {
   Serial.printf("  retrying in %lu s\n", (unsigned long)(retryDelay / 1000));
 }
 
-// Called by the MQTT library whenever a message arrives on a feed we
+// Called by the MQTT library whenever a message arrives on a topic we
 // subscribed to. The message arrives as raw bytes (payload) with a length,
-// not as ready-made text, so the first job is to copy it into a String.
-//
-// Feeds (with FEED_GROUP from config.h, e.g. "espweb"):
-//   <group>.brightness  0-100
-//   <group>.color       colour name ("Blue", "Hot Pink") or hex ("#FF8800")
-//   <group>.onoff and <group>.button
-//                       ON, OFF, WHITE,
-//                       SOLID, FADE, RAINBOW, RANDOM, SMOOTH (or PALETTE), STEPPED, CANDLE,
-//                       or a palette name: CLOUD, OCEAN, PARTY, HEAT, FOREST, LAVA
-//   <group>.outtopic    (published by the lamp) status report
+// not as ready-made text.
 void onMqttMessage(char *topic, byte *payload, unsigned int length) {
-  String feed(topic);
-  String text;
-  text.reserve(length);   // set aside memory once, rather than growing it letter by letter
-  for (unsigned int i = 0; i < length; i++) text += (char)payload[i];   // (char) treats each byte as a letter
-  text.trim();
-  Serial.printf("Adafruit IO: %s = %s\n", feed.c_str(), text.c_str());
+  // Print it. %.*s prints exactly `length` characters - needed because the
+  // payload has no end-of-text marker. (int) converts the length to the type
+  // printf expects for the *.
+  Serial.printf("MQTT: %s = %.*s\n", topic, (int)length, (const char *)payload);
 
-  if (feed == topicBrightness) {
-    // constrain() keeps a value inside a range; map() rescales 0-100 to 1-255.
-    long percent = constrain(text.toInt(), 0L, 100L);
-    setBrightness(map(percent, 0, 100, 1, 255));
+  if (topicSet == topic) {
+    handleLightCommand(payload, length);
     return;
   }
 
-  if (feed == topicColour) {
-    CRGB colour;
-    if (colourFromText(text, colour)) setColour(colour);
-    else Serial.println("  unknown colour");
+  if (topicPaletteSet == topic) {
+    // The palette selector sends the palette's name, e.g. "Ocean".
+    // strncmp compares at most `length` characters; 0 means they match.
+    for (uint8_t i = 0; i < PALETTE_COUNT; i++) {
+      if (strlen(PALETTES[i].name) == length &&
+          strncmp(PALETTES[i].name, (const char *)payload, length) == 0) {
+        setPalette(i);
+        return;
+      }
+    }
+    Serial.println("  unknown palette");
     return;
   }
 
-  // Everything else is a command word. `return setPower(true);` calls the
-  // function and then leaves onMqttMessage, so only one command runs.
-  text.toLowerCase();
-  if (text == "on")    return setPower(true);
-  if (text == "off")   return setPower(false);
-  if (text == "white") return setColour(CRGB::White);
-
-  for (const ModeWord &m : MODE_WORDS) {
-    if (text == m.word) return setMode(m.mode);
+  // Home Assistant has (re)started: it forgets nothing retained, but sending
+  // the discovery and state again is what Home Assistant recommends.
+  if (strcmp(topic, HA_STATUS_TOPIC) == 0 && length == 6 &&
+      strncmp((const char *)payload, "online", 6) == 0) {
+    discoveryPending = true;
+    statePending = true;
   }
-  for (uint8_t i = 0; i < PALETTE_COUNT; i++) {
-    if (text.equalsIgnoreCase(PALETTES[i].name)) return setPalette(i);
-  }
-  Serial.println("  unknown command");
 }
 
-// The report shown in the dashboard's status block. "\n" starts a new line.
-String statusText() {
-  String s;
-  s.reserve(300);
-  s += "Power: ";       s += lamp.on ? "On" : "Off";
-  s += "\nMode: ";      s += MODE_NAMES[lamp.mode];
-  if (lamp.mode == MODE_PALETTE_SMOOTH || lamp.mode == MODE_PALETTE_STEPPED) {
-    s += "\nPalette: "; s += PALETTES[lamp.palette].name;
+// A light command from Home Assistant, in JSON. Examples:
+//   {"state":"OFF"}
+//   {"state":"ON"}
+//   {"state":"ON","brightness":77}
+//   {"state":"ON","color":{"r":255,"g":0,"b":128}}
+//   {"state":"ON","effect":"Candle"}
+// One command can carry several of these at once, so check each of them.
+void handleLightCommand(byte *payload, unsigned int length) {
+  // A JsonDocument holds JSON that has been taken apart into its pieces.
+  // deserializeJson() does the taking apart; it returns an error if the
+  // text isn't valid JSON.
+  JsonDocument command;
+  DeserializationError error = deserializeJson(command, payload, length);
+  if (error) {
+    Serial.printf("  not valid JSON (%s)\n", error.c_str());
+    return;
   }
-  if (lamp.mode == MODE_SOLID) {
-    char hex[8];   // "#RRGGBB" is 7 characters, plus 1 for the end-of-text marker
-    snprintf(hex, sizeof(hex), "#%02X%02X%02X", lamp.colour.r, lamp.colour.g, lamp.colour.b);
-    s += "\nColour: ";  s += hex;
+
+  // command["state"] reads one field. `| ""` means "or empty text if the
+  // field is missing", so `state` is never a null pointer.
+  const char *state = command["state"] | "";
+  if (strcmp(state, "OFF") == 0) {   // strcmp() returns 0 when two texts are equal
+    setPower(false);
+    return;
   }
-  // + 127 rounds to the nearest percent instead of always rounding down
-  s += "\nBrightness: "; s += (lamp.brightness * 100 + 127) / 255; s += "%";
-  s += "\nWi-Fi: ";     s += WiFi.SSID(); s += " ("; s += WiFi.RSSI(); s += " dBm)";
-  s += "\nIP: ";        s += WiFi.localIP().toString();
-  s += "\nHost: ";      s += DEVICE_NAME; s += ".local";
-#if ENABLE_ALEXA
-  s += "\nAlexa name: "; s += ALEXA_NAME;
-#endif
-  s += "\nAdafruit IO: "; s += MQTT_USE_TLS ? "encrypted (TLS)" : "unencrypted";
-  s += "\nFirmware: v"; s += FIRMWARE_VERSION; s += ", up "; s += uptimeText();
-  return s;
+
+  // is<JsonObject>() checks that "color" exists and is a { ... } group.
+  if (command["color"].is<JsonObject>()) {
+    JsonObject colour = command["color"];
+    setColour(CRGB(colour["r"] | 0, colour["g"] | 0, colour["b"] | 0));   // also selects Solid colour
+  }
+
+  // An effect is one of our modes, by name (see MODE_NAMES).
+  if (command["effect"].is<const char *>()) {
+    const char *effect = command["effect"];
+    bool found = false;
+    for (uint8_t mode = MODE_MIN; mode <= MODE_MAX; mode++) {
+      if (strcmp(effect, MODE_NAMES[mode]) == 0) {
+        setMode(mode);
+        found = true;
+        break;   // stop the for loop: we found it
+      }
+    }
+    if (!found) Serial.println("  unknown effect");
+  }
+
+  // Home Assistant's brightness is 0-255, the same scale as ours.
+  if (command["brightness"].is<int>()) {
+    setBrightness(constrain(command["brightness"].as<int>(), 1, 255));
+  }
+
+  // Any command other than OFF means the lamp should be on. (setColour and
+  // setMode switch it on already; this covers a plain {"state":"ON"}.)
+  if (!lamp.on) setPower(true);
+}
+
+// Sends a JsonDocument to a topic as one retained message.
+// Instead of building the whole text in memory first, it tells the broker
+// how long the message will be (measureJson), then serializeJson() writes it
+// straight into the connection. That way even long messages need no extra
+// memory, and they aren't limited by the 512-byte receive buffer.
+bool publishJson(const String &topic, JsonDocument &doc) {
+  size_t length = measureJson(doc);
+  if (!mqtt.beginPublish(topic.c_str(), length, true)) return false;   // true = retained
+  serializeJson(doc, mqtt);
+  return mqtt.endPublish();
+}
+
+// The "device" part of every discovery message. Home Assistant groups all
+// entities with the same identifiers into one device card, and shows the
+// rest (maker, model, firmware, a link to the web page) on that card.
+void addDeviceInfo(JsonDocument &doc) {
+  // doc["device"].to<JsonObject>() creates an empty { } group called "device"
+  // and gives us a handle to fill it in.
+  JsonObject device = doc["device"].to<JsonObject>();
+  device["identifiers"].to<JsonArray>().add(deviceId);   // a [ ] list with one entry
+  device["name"]         = LAMP_NAME;
+  device["manufacturer"] = "DIY (ESP8266 RGB Controller)";
+  device["model"]        = "Wemos D1 Mini + " + String(LED_COUNT) + " WS2812B LEDs";
+  device["sw_version"]   = FIRMWARE_VERSION;
+  device["configuration_url"] = "http://" + WiFi.localIP().toString() + "/";
+
+  // "origin" tells Home Assistant which software sent the discovery message.
+  JsonObject origin = doc["origin"].to<JsonObject>();
+  origin["name"]        = "ESP8266 RGB Controller";
+  origin["sw_version"]  = FIRMWARE_VERSION;
+  origin["support_url"] = "https://github.com/gcinini/ESP8266-RGB-Controller";
+}
+
+// Announces the lamp to Home Assistant: one retained "config" message per
+// entity, on <prefix>/<entity type>/<deviceId>/<what>/config.
+void publishDiscovery() {
+  String base = String(HA_DISCOVERY_PREFIX) + "/";
+  String node = String("/") + deviceId + "/";
+  String id = deviceId;
+  bool ok = true;
+
+  // 1. The light: on/off, brightness, colour, and the modes as "effects".
+  {   // the braces make `light` exist only inside this block, freeing its memory at the end
+    JsonDocument light;
+    light["name"] = nullptr;   // null = use the device name ("Bedlight") for the light itself
+    light["unique_id"]          = id + "_light";
+    light["schema"]             = "json";   // commands and state are JSON, as in handleLightCommand()
+    light["command_topic"]      = topicSet;
+    light["state_topic"]        = topicState;
+    light["availability_topic"] = topicAvailability;
+    light["brightness"]         = true;
+    light["supported_color_modes"].to<JsonArray>().add("rgb");
+    light["effect"]             = true;
+    JsonArray effects = light["effect_list"].to<JsonArray>();
+    for (uint8_t mode = MODE_MIN; mode <= MODE_MAX; mode++) effects.add(MODE_NAMES[mode]);
+    addDeviceInfo(light);
+    ok &= publishJson(base + "light" + node + "light/config", light);   // a &= b: ok stays true only if b is true
+  }
+
+  // 2. A drop-down list for the palette.
+  {
+    JsonDocument select;
+    select["name"]               = "Palette";
+    select["unique_id"]          = id + "_palette";
+    select["icon"]               = "mdi:palette";
+    select["command_topic"]      = topicPaletteSet;
+    select["state_topic"]        = topicState;
+    select["value_template"]     = "{{ value_json.palette }}";   // read "palette" from the state JSON
+    select["availability_topic"] = topicAvailability;
+    JsonArray options = select["options"].to<JsonArray>();
+    for (uint8_t i = 0; i < PALETTE_COUNT; i++) options.add(PALETTES[i].name);
+    addDeviceInfo(select);
+    ok &= publishJson(base + "select" + node + "palette/config", select);
+  }
+
+  // 3. Wi-Fi signal strength, shown under "Diagnostic" on the device card.
+  {
+    JsonDocument sensor;
+    sensor["name"]                = "Wi-Fi signal";
+    sensor["unique_id"]           = id + "_rssi";
+    sensor["device_class"]        = "signal_strength";
+    sensor["unit_of_measurement"] = "dBm";
+    sensor["state_class"]         = "measurement";
+    sensor["entity_category"]     = "diagnostic";
+    sensor["state_topic"]         = topicState;
+    sensor["value_template"]      = "{{ value_json.rssi }}";
+    sensor["availability_topic"]  = topicAvailability;
+    addDeviceInfo(sensor);
+    ok &= publishJson(base + "sensor" + node + "rssi/config", sensor);
+  }
+
+  // 4. The lamp's IP address, also a diagnostic.
+  {
+    JsonDocument sensor;
+    sensor["name"]               = "IP address";
+    sensor["unique_id"]          = id + "_ip";
+    sensor["icon"]               = "mdi:ip-network";
+    sensor["entity_category"]    = "diagnostic";
+    sensor["state_topic"]        = topicState;
+    sensor["value_template"]     = "{{ value_json.ip }}";
+    sensor["availability_topic"] = topicAvailability;
+    addDeviceInfo(sensor);
+    ok &= publishJson(base + "sensor" + node + "ip/config", sensor);
+  }
+
+  Serial.println(ok ? "MQTT: announced to Home Assistant" : "MQTT: announcing to Home Assistant failed");
+  if (ok) discoveryPending = false;   // otherwise loop() tries again
+}
+
+// Reports what the lamp is doing, for example:
+//   {"state":"ON","brightness":128,"color_mode":"rgb","color":{"r":255,"g":180,"b":107},
+//    "effect":"Candle","palette":"Ocean","rssi":-63,"ip":"192.168.30.30"}
+// The light reads state/brightness/color/effect; the palette selector and
+// the two sensors pick out their own field with their value_template.
+void publishState() {
+  JsonDocument state;
+  state["state"]      = lamp.on ? "ON" : "OFF";
+  state["brightness"] = lamp.brightness;
+  state["color_mode"] = "rgb";
+  JsonObject colour = state["color"].to<JsonObject>();
+  colour["r"] = lamp.colour.r;
+  colour["g"] = lamp.colour.g;
+  colour["b"] = lamp.colour.b;
+  state["effect"]  = MODE_NAMES[lamp.mode];
+  state["palette"] = PALETTES[lamp.palette].name;
+  state["rssi"]    = WiFi.RSSI();
+  state["ip"]      = WiFi.localIP().toString();
+  if (publishJson(topicState, state)) {
+    statePending = false;
+    lastStateAt = millis();
+    if (lastStateAt == 0) lastStateAt = 1;   // never store 0, which means "never sent"
+  }
+}
+
+// Called from loop(). Sends the discovery when it's needed, and the state
+// STATE_SETTLE_MS after a change (so a burst of changes - like dragging the
+// brightness slider - becomes one report) or every STATE_HEARTBEAT_MS.
+void publishToHomeAssistantIfDue() {
+  if (!mqtt.connected()) return;
+  if (discoveryPending) publishDiscovery();
+
+  uint32_t now = millis();
+  bool heartbeatDue = (lastStateAt == 0) || (now - lastStateAt >= STATE_HEARTBEAT_MS);
+  if (!statePending && !heartbeatDue) return;
+  if (now - lastChangeAt < STATE_SETTLE_MS) return;
+  publishState();
 }
 
 // How long the lamp has been running, e.g. "2h 05m" or "3d 4h 10m".
@@ -901,22 +1047,6 @@ String uptimeText() {
   return String(text);
 }
 
-// Sends the status report after a change has settled, never more often than
-// STATUS_MIN_GAP_MS, and every STATUS_HEARTBEAT_MS so the uptime stays current.
-void publishStatusIfDue() {
-  if (!mqtt.connected()) return;
-  uint32_t now = millis();
-  bool heartbeatDue = (now - lastStatusAt >= STATUS_HEARTBEAT_MS);
-  if (!statusPending && !heartbeatDue) return;
-  if (now - lastChangeAt < STATUS_SETTLE_MS) return;
-  if (lastStatusAt != 0 && now - lastStatusAt < STATUS_MIN_GAP_MS) return;
-
-  if (mqtt.publish(topicStatus.c_str(), statusText().c_str())) {
-    statusPending = false;
-    lastStatusAt = (now == 0) ? 1 : now;   // never store 0, which means "never sent"
-  }
-}
-
 
 // ===========================================================================
 // 9. Alexa
@@ -926,7 +1056,7 @@ void publishStatusIfDue() {
 //      every device on the local network. Espalexa answers "I am a Hue bridge".
 //   2. The Echo asks for the bridge's description (/description.xml) and its
 //      list of lights (/api/.../lights), and finds one colour light,
-//      ALEXA_NAME. These requests arrive on our own web server (port 80).
+//      LAMP_NAME. These requests arrive on our own web server (port 80).
 //   3. "Alexa, set the lightbox to blue": the Echo sends a small JSON message
 //      to /api/.../lights/1/state, Espalexa decodes it and calls
 //      onAlexaCommand() below.
@@ -938,7 +1068,7 @@ void startAlexa() {
   // `new` creates an object that lives until the program ends (a function's
   // normal variables disappear when it returns). EspalexaDeviceType::color
   // tells Alexa this is a bulb that supports colours, not just on/off.
-  alexaLight = new EspalexaDevice(ALEXA_NAME, onAlexaCommand, EspalexaDeviceType::color, lamp.brightness);
+  alexaLight = new EspalexaDevice(LAMP_NAME, onAlexaCommand, EspalexaDeviceType::color, lamp.brightness);
   espalexa.addDevice(alexaLight);
   syncAlexa();                 // start with the lamp's real state
   // Share our web server with Espalexa. begin() adds its pages, starts
@@ -946,7 +1076,7 @@ void startAlexa() {
   // false if it could not listen for searches - and in that case it does NOT
   // start the web server, so we start it ourselves to keep the web page working.
   if (espalexa.begin(&web)) {
-    Serial.printf("Alexa: ready as \"%s\" - say \"Alexa, discover devices\"\n", ALEXA_NAME);
+    Serial.printf("Alexa: ready as \"%s\" - say \"Alexa, discover devices\"\n", LAMP_NAME);
   } else {
     web.begin();
     Serial.println("Alexa: could not start (multicast failed) - web page still works");
@@ -993,7 +1123,7 @@ void onAlexaCommand(EspalexaDevice *device) {
 
 // Copies the lamp's state into the Alexa bulb, so the Alexa app shows the
 // right on/off, brightness and colour after changes from the web page or
-// Adafruit IO. Called from lampChanged(); does nothing without Alexa.
+// Home Assistant. Called from lampChanged(); does nothing without Alexa.
 void syncAlexa() {
 #if ENABLE_ALEXA
   if (alexaLight == nullptr) return;   // not created yet (during start-up)
@@ -1109,14 +1239,15 @@ String stateAsJson() {
     json += PALETTES[i].name;
     json += '"';
   }
-  json += "],\"host\":\"";    json += DEVICE_NAME;
+  json += "],\"name\":\"";    json += LAMP_NAME;
+  json += "\",\"host\":\"";   json += DEVICE_NAME;
   json += "\",\"ip\":\"";     json += WiFi.localIP().toString();
   json += "\",\"rssi\":";     json += WiFi.RSSI();
   json += ",\"mqtt\":";       json += mqtt.connected() ? "true" : "false";
-  json += ",\"tls\":";        json += MQTT_USE_TLS ? "true" : "false";
+  json += ",\"broker\":\"";  json += MQTT_HOST; json += "\"";
   json += ",\"heap\":";       json += ESP.getFreeHeap();
 #if ENABLE_ALEXA
-  json += ",\"alexa\":\"";    json += ALEXA_NAME; json += "\"";
+  json += ",\"alexa\":\"";    json += LAMP_NAME; json += "\"";
 #endif
   json += ",\"version\":\"";  json += FIRMWARE_VERSION;
   json += "\",\"uptime\":\""; json += uptimeText();

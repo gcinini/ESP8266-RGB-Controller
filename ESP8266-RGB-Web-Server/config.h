@@ -47,9 +47,18 @@
 // Copy a whole block to add another lamp, give it the next number, and change
 // its values. Only the block whose number matches LAMP_ID is used.
 //
-//   DEVICE_NAME        Network name. Shown on the web page and in Adafruit IO,
-//                      and used for OTA. Must be different on every lamp.
+//   DEVICE_NAME        Network name (hostname), used for OTA and mDNS
+//                      (<name>.local). Must be different on every lamp.
 //                      Letters, digits and hyphens only.
+//   LAMP_NAME          The friendly name people see and say: the device name
+//                      in Home Assistant, the name Alexa knows the lamp by
+//                      ("Alexa, turn on the bedlight") and the web page title.
+//                      Give each lamp a different name. If you change it, ask
+//                      Alexa to discover devices again and delete the old one
+//                      in the Alexa app. (Home Assistant updates by itself.)
+//   MQTT_TOPIC         Start of this lamp's MQTT topics: the lamp listens on
+//                      <topic>/set and reports on <topic>/state. Lower case,
+//                      no spaces, different on every lamp.
 //   LED_COUNT          Number of LEDs on the strip.
 //   LED_PIN            Board pin the strip's data wire is connected to.
 //                      On a Wemos D1 Mini, D4 is GPIO2.
@@ -60,40 +69,30 @@
 //                      flame in Candle mode.
 //   CANDLE_AT_LED_ZERO true if the first LED of the strip is at the bottom of
 //                      the lamp. If the flame appears at the top, set false.
-//   ALEXA_NAME         The name Alexa knows this lamp by ("Alexa, turn on the
-//                      lightbox"). Give each lamp a different name. If you change
-//                      it, ask Alexa to discover devices again and delete the old
-//                      one in the Alexa app.
-//   FEED_GROUP         Adafruit IO feed group. The lamp listens to
-//                      <group>.onoff, .button, .color, .brightness and reports
-//                      to <group>.outtopic. Give each lamp its own group so
-//                      buttons and status reports don't mix. (Two lamps that
-//                      share a group react to the same buttons, but overwrite
-//                      each other's status report.)
 
 #if LAMP_ID == 1
   // --- Lamp 1: the bed headboard light bar (was a glass-jar lightbox) (34 LEDs) ---
-  #define DEVICE_NAME          "ESP-lightbox1"
+  #define DEVICE_NAME          "ESP-bedlight"
+  #define LAMP_NAME            "Bedlight"
+  #define MQTT_TOPIC           "bedlight"
   #define LED_COUNT            34
   #define LED_PIN              D4
   #define LED_TYPE             WS2812B
   #define LED_ORDER            GRB
   #define CANDLE_LEDS          14
   #define CANDLE_AT_LED_ZERO   true
-  #define ALEXA_NAME           "Bedlight"
-  #define FEED_GROUP           "espweb"
 
 #elif LAMP_ID == 2
   // --- Lamp 2: example values, edit them for your second lamp ---
   #define DEVICE_NAME          "ESP-lightbox2"
+  #define LAMP_NAME            "Lightbox 2"
+  #define MQTT_TOPIC           "lightbox2"
   #define LED_COUNT            60
   #define LED_PIN              D4
   #define LED_TYPE             WS2812B
   #define LED_ORDER            GRB
   #define CANDLE_LEDS          20
   #define CANDLE_AT_LED_ZERO   true
-  #define ALEXA_NAME           "Lightbox 2"
-  #define FEED_GROUP           "lamp2"
 
 #else
   #error "Unknown LAMP_ID: add a settings block for it in config.h"
@@ -133,31 +132,27 @@
 // directly - no Alexa skill, no cloud service in between. Alexa can switch it
 // on and off, set the brightness and set a colour (which selects Solid colour
 // mode). Modes such as Candle are not available by voice.
-// Set to 0 to turn this off. (Like MQTT_USE_TLS below, it can also be set
-// from secrets.h or a PlatformIO build flag, -D ENABLE_ALEXA=0, which wins.)
+// Set to 0 to turn this off. (It can also be set from secrets.h or a
+// PlatformIO build flag, -D ENABLE_ALEXA=0, which wins.)
 #ifndef ENABLE_ALEXA
 #define ENABLE_ALEXA           1
 #endif
 
-// --- Adafruit IO (MQTT) ------------------------------------------------------
-#define MQTT_HOST              "io.adafruit.com"
-#define MQTT_RETRY_MS          5000   // first wait before reconnecting; doubles up to 60 s
+// --- Home Assistant (MQTT) -----------------------------------------------------
+// The lamp connects to an MQTT broker (Mosquitto) on your own network and
+// announces itself to Home Assistant there ("MQTT discovery"), so it appears
+// in Home Assistant by itself - no YAML to write. Login details for the
+// broker go in secrets.h.
+//
+// Use the broker's IP address: a .local name doesn't work across VLANs.
+#define MQTT_HOST              "192.168.10.61"   // Pi5, which runs Home Assistant and Mosquitto
+#define MQTT_PORT              1883              // standard (unencrypted) MQTT port
+#define MQTT_RETRY_MS          5000              // first wait before reconnecting; doubles up to 60 s
 
-// Encrypted connection (TLS on port 8883) is on by default. To turn it off,
-// put `#define MQTT_USE_TLS 0` in secrets.h - only as a last resort, because
-// your Adafruit IO key is then sent unencrypted.
-#ifndef MQTT_USE_TLS
-#define MQTT_USE_TLS           1
-#endif
+// Home Assistant listens for new devices under this prefix. "homeassistant"
+// is Home Assistant's default - only change it if you changed it there too.
+#define HA_DISCOVERY_PREFIX    "homeassistant"
 
-// Status reports to the <group>.outtopic feed. The free Adafruit IO plan
-// allows 30 messages a minute, so reports are grouped and spaced out.
-#define STATUS_SETTLE_MS       1500     // wait for changes to settle before reporting
-#define STATUS_MIN_GAP_MS      5000     // never report more often than this
-#define STATUS_HEARTBEAT_MS    600000   // report every 10 minutes even if nothing changed
-
-// --- Clock ---------------------------------------------------------------------
-// Certificates have expiry dates, so the lamp sets its clock from the internet
-// before making the encrypted connection.
-#define NTP_SERVER_1           "pool.ntp.org"
-#define NTP_SERVER_2           "time.google.com"
+// State reports to <topic>/state, which Home Assistant shows.
+#define STATE_SETTLE_MS        250      // wait this long after a change, so a burst becomes one report
+#define STATE_HEARTBEAT_MS     60000    // report every minute even if nothing changed (keeps Wi-Fi signal current)
