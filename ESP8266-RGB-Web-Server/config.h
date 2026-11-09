@@ -122,6 +122,34 @@
 #define FRAME_INTERVAL_MS      20     // time between animation frames: 20 ms = 50 frames a second
 #define RANDOM_HOLD_MS         8000   // how long Random mode keeps each palette
 #define COLOUR_GAMMA           2.6f   // corrects picked colours for how LEDs look (see setColour)
+#define DEFAULT_SPEED          5      // effect speed 1 (slow) to 10 (fast) until changed; 5 = the v4.0 speed
+
+// --- Fades ----------------------------------------------------------------------
+// Every change (on/off, brightness, colour) fades instead of jumping.
+// Home Assistant can ask for a longer fade with "transition" (in seconds).
+#define DEFAULT_FADE_MS        400    // fade length when nothing else is asked for
+#define MAX_TRANSITION_S       3600   // longest fade accepted from Home Assistant (1 hour)
+
+// --- Special effects ------------------------------------------------------------
+#define SUNRISE_MINUTES        20     // Sunrise: dark red -> warm white over this long, unless
+                                      // Home Assistant sends a "transition" with the effect
+#define SLEEP_FADE_SECONDS     60     // when the sleep timer runs out, fade off over this long
+#define SLEEP_MAX_MINUTES      120    // longest sleep timer
+
+// Night light: a very dim amber that ignores the brightness setting.
+#define NIGHT_LIGHT_LEVEL      12     // overall brightness 1-255 (12 is about 5%)
+#define NIGHT_LIGHT_RED        255
+#define NIGHT_LIGHT_GREEN      60
+#define NIGHT_LIGHT_BLUE       0
+
+// Reading light: bright in the middle, dim at the ends, in this white.
+#define READING_LIGHT_KELVIN   3500
+
+// --- White temperature ------------------------------------------------------------
+// Range offered to Home Assistant's colour-temperature picker, in kelvin:
+// 2000 K is candle-warm, 2700 K a warm bulb, 4000 K neutral, 6500 K daylight.
+#define MIN_KELVIN             2000
+#define MAX_KELVIN             6500
 
 // --- Saving settings to flash --------------------------------------------------
 #define SAVE_DELAY_MS          2000   // save this long after the last change

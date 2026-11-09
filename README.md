@@ -4,12 +4,15 @@ Wi-Fi firmware for a WS2812B LED lamp built on a Wemos D1 Mini (ESP8266). You co
 
 ## Features
 
-- **Web page** served by the lamp itself, works on phones and desktops: power, colour (using the browser's own colour picker), brightness, mode and palette.
-- **Modes:** solid colour, colour fade, rainbow, random (a different palette every few seconds), palette modes with smooth or stepped blending, and a flickering candle.
+- **Web page** served by the lamp itself, works on phones and desktops: power, colour (using the browser's own colour picker), white temperature, brightness, mode, palette, effect speed and sleep timer.
+- **14 modes:** solid colour, colour fade, rainbow, random (a different palette every few seconds), palette modes with smooth or stepped blending, candle, fireplace, breathe, twinkle, comet, reading light, sunrise and night light (see [Modes](#modes)).
+- **Smooth fades.** Every change fades instead of jumping; Home Assistant can ask for longer fades (a "transition").
+- **Wake-up and bedtime:** a Sunrise effect (dark red to warm white over 20 minutes, or any length you choose), a sleep timer that fades the lamp off, and a very dim night light.
+- **Whites by colour temperature**, from candle-warm 2000 K to daylight 6500 K.
 - **Palettes:** Cloud, Ocean, Party, Heat, Forest, Lava.
 - **Alexa voice control**, directly over your home network: no Alexa skill, account linking or cloud service needed. The lamp appears in the Alexa app as a colour bulb.
-- **Home Assistant integration** over MQTT with automatic discovery: a light with brightness, colour and every mode as an effect, a palette selector, and Wi-Fi signal and IP address sensors.
-- **Remembers its settings.** Colour, brightness, mode and palette are restored after a power cut.
+- **Home Assistant integration** over MQTT with automatic discovery: a light with brightness, colour, white temperature, fades and every mode as an effect, a palette selector, effect-speed and sleep-timer sliders, and Wi-Fi signal and IP address sensors.
+- **Remembers its settings.** Colour, brightness, mode, palette and effect speed are restored after a power cut. (A sunrise that was running comes back as solid colour, so a power cut at night doesn't start one.)
 - **Over-the-air (OTA) updates** over Wi-Fi, optionally password protected.
 - **Keeps working on its own.** If the broker or Home Assistant is down, the web page and Alexa keep working, and MQTT reconnects in the background.
 
@@ -56,7 +59,7 @@ All the settings you might change for a particular lamp are in **`ESP8266-RGB-We
 | `LED_COUNT`, `LED_PIN`, `LED_TYPE`, `LED_ORDER` | The LED strip |
 | `CANDLE_LEDS`, `CANDLE_AT_LED_ZERO` | Size and position of the Candle mode flame |
 
-Below the lamp blocks are settings shared by every lamp: power limit, starting colour and brightness, animation speed, Alexa on/off (`ENABLE_ALEXA`), and the MQTT broker's address (`MQTT_HOST`).
+Below the lamp blocks are settings shared by every lamp: power limit, starting colour and brightness, animation speed, fade length (`DEFAULT_FADE_MS`), Sunrise length (`SUNRISE_MINUTES`), the night light's colour and level, the reading light's white, the white-temperature range, Alexa on/off (`ENABLE_ALEXA`), and the MQTT broker's address (`MQTT_HOST`).
 
 ### More than one lamp
 
@@ -93,6 +96,26 @@ Open the repo folder in VS Code. PlatformIO downloads the board package and the 
 
 There's nothing else to upload: the web page is part of the firmware.
 
+## Modes
+
+| # | Mode | What it does |
+|---|---|---|
+| 1 | Solid colour | One colour (or a white picked by temperature) |
+| 2 | Colour fade | The whole lamp slowly drifts through colours |
+| 3 | Rainbow | A rainbow moving along the strip |
+| 4 | Random | A different palette every few seconds |
+| 5, 6 | Palette, smooth / stepped | The chosen palette moving along the strip, blended or in hard steps |
+| 7 | Candle | A flickering flame on the first `CANDLE_LEDS` LEDs |
+| 8 | Fireplace | Glowing, crackling embers along the whole bar |
+| 9 | Breathe | The chosen colour slowly brightens and dims |
+| 10 | Twinkle | Stars twinkling on a dim background of the chosen colour |
+| 11 | Comet | A dot of the chosen colour travelling end to end with a fading tail |
+| 12 | Reading light | Warm white (`READING_LIGHT_KELVIN`), bright in the middle and dim at the ends |
+| 13 | Sunrise | Dark → deep red → orange → warm white over `SUNRISE_MINUTES` (20), then stays on |
+| 14 | Night light | Very dim amber (`NIGHT_LIGHT_LEVEL`), whatever the brightness setting |
+
+**Effect speed** (1–10, default 5) sets how fast the animated modes move. **Changes fade** over 0.4 s (`DEFAULT_FADE_MS`). The **sleep timer** (0–120 minutes) switches the lamp off with a one-minute fade; switching off by hand cancels it.
+
 ## Using it
 
 After boot, the serial monitor shows the lamp's address, for example `http://192.168.30.30/` (or `http://ESP-bedlight.local/`). Open it in a browser. The page refreshes itself every few seconds, so changes made by Alexa or Home Assistant show up there too. The page heading shows the lamp's `LAMP_NAME`, and its **Network** section shows the address, Wi-Fi signal, Home Assistant (MQTT) connection, Alexa name and firmware version.
@@ -103,8 +126,10 @@ The lamp talks to Home Assistant through an **MQTT broker** on your own network,
 
 | Entity | What it does |
 |---|---|
-| `light.bedlight` | On/off, brightness and colour. The modes are listed as **effects**: Solid colour, Colour fade, Rainbow, Random, Palette smooth/stepped, Candle |
+| `light.bedlight` | On/off, brightness, colour, white temperature (2000–6500 K) and fades (transition). The 14 modes are listed as **effects** |
 | `select.bedlight_palette` | Chooses the palette (Cloud, Ocean, Party, Heat, Forest, Lava); this also switches to a palette mode |
+| `number.bedlight_effect_speed` | Effect speed slider, 1–10 |
+| `number.bedlight_sleep_timer` | Sleep timer slider, 0–120 minutes (0 = off); counts down while running |
 | `sensor.bedlight_wi_fi_signal` | Wi-Fi signal in dBm (diagnostic) |
 | `sensor.bedlight_ip_address` | The lamp's IP address (diagnostic) |
 
@@ -178,13 +203,49 @@ For scripts, or to watch with a tool like MQTT Explorer. `bedlight` is `MQTT_TOP
 
 | Topic | Direction | Contents |
 |---|---|---|
-| `bedlight/set` | to the lamp | JSON, e.g. `{"state":"ON","brightness":128}`, `{"color":{"r":255,"g":0,"b":0}}`, `{"effect":"Candle"}`, `{"state":"OFF"}` |
+| `bedlight/set` | to the lamp | JSON, e.g. `{"state":"ON","brightness":128}`, `{"color":{"r":255,"g":0,"b":0}}`, `{"color_temp":2700}` (kelvin), `{"effect":"Candle"}`, `{"state":"OFF","transition":600}` (fade over 10 minutes) |
 | `bedlight/palette/set` | to the lamp | a palette name, e.g. `Ocean` |
-| `bedlight/state` | from the lamp (retained) | `{"state":"ON","brightness":128,"color_mode":"rgb","color":{"r":255,"g":180,"b":107},"effect":"Candle","palette":"Ocean","rssi":-63,"ip":"192.168.30.30"}` |
+| `bedlight/speed/set` | to the lamp | effect speed `1`–`10` |
+| `bedlight/sleep/set` | to the lamp | sleep timer in minutes, `0`–`120` (`0` cancels) |
+| `bedlight/state` | from the lamp (retained) | `{"state":"ON","brightness":128,"color_mode":"rgb","color":{"r":255,"g":180,"b":107},"effect":"Candle","palette":"Ocean","speed":5,"sleep":0,"rssi":-63,"ip":"192.168.30.30"}`; for a white, `"color_mode":"color_temp","color_temp":2700` instead of `color` |
 | `bedlight/availability` | from the lamp (retained) | `online`, or `offline` (sent by the broker if the lamp disappears) |
 | `homeassistant/…/config` | from the lamp (retained) | the discovery messages |
 
 The lamp reports its state a quarter of a second after any change and once a minute, and announces itself again whenever Home Assistant restarts.
+
+#### Automation examples
+
+A 30-minute sunrise on weekdays, and a 10-minute fade to off at bedtime. The `transition` sets the Sunrise length when it's sent with that effect, and the fade length otherwise:
+
+```yaml
+- alias: Bedlight sunrise
+  triggers:
+    - trigger: time
+      at: "06:30:00"
+  conditions:
+    - condition: time
+      weekday: [mon, tue, wed, thu, fri]
+  actions:
+    - action: light.turn_on
+      target:
+        entity_id: light.bedlight
+      data:
+        effect: Sunrise
+        brightness_pct: 80
+        transition: 1800
+- alias: Bedlight bedtime fade
+  triggers:
+    - trigger: time
+      at: "23:00:00"
+  actions:
+    - action: light.turn_off
+      target:
+        entity_id: light.bedlight
+      data:
+        transition: 600
+```
+
+To start the sleep timer from an automation or script, set `number.bedlight_sleep_timer` with the `number.set_value` action.
 
 ### Alexa
 
@@ -203,7 +264,8 @@ The lamp pretends to be a Philips Hue colour bulb (using the [Espalexa](https://
 | "Alexa, turn on the Bedlight" / "turn off" | switches on in its last mode (Candle, Rainbow…), or off |
 | "Alexa, set the Bedlight to 40%" | sets the brightness |
 | "Alexa, brighten / dim the Bedlight" | changes the brightness |
-| "Alexa, set the Bedlight to blue" (or pink, purple, white…) | Solid colour mode in that colour |
+| "Alexa, set the Bedlight to blue" (or pink, purple…) | Solid colour mode in that colour |
+| "Alexa, set the Bedlight to warm white" (or soft white, daylight…) | Solid colour mode in that white, if Alexa sends it as a colour temperature |
 
 Modes and palettes aren't available by voice, because a Hue bulb has no such setting. You can still put the lamp in a group or a routine in the Alexa app, like any other light. Changes made from the web page or Home Assistant show up in the Alexa app.
 
@@ -226,12 +288,15 @@ Every other endpoint is a plain GET request and answers with the current state a
 
 | Endpoint | Example |
 |---|---|
-| `/state` | `{"on":true,"mode":3,"palette":1,"brightness":128,"colour":"#ffb46b","palettes":[...],"name":"Bedlight","host":"ESP-bedlight","ip":"192.168.30.30","rssi":-63,"mqtt":true,"broker":"192.168.10.61","heap":30000,"alexa":"Bedlight","version":"4.0.0","uptime":"2h 05m"}` |
+| `/state` | `{"on":true,"mode":3,"palette":1,"brightness":128,"colour":"#ffb46b","palettes":[...],"name":"Bedlight","host":"ESP-bedlight","ip":"192.168.30.30","rssi":-63,"mqtt":true,"broker":"192.168.10.61","heap":30000,"alexa":"Bedlight","version":"4.1.0","uptime":"2h 05m"}` (also `"speed"`, `"kelvin"` and `"sleep"`) |
 | `/power?on=1` or `?on=0` | turn on or off |
 | `/colour?hex=ff8800` | solid colour (a colour name also works) |
 | `/brightness?value=1-255` | brightness |
-| `/mode?id=1-7` | 1 solid, 2 fade, 3 rainbow, 4 random, 5 palette smooth, 6 palette stepped, 7 candle |
+| `/mode?id=1-14` | the mode numbers in [Modes](#modes) |
 | `/palette?id=0-5` | 0 Cloud, 1 Ocean, 2 Party, 3 Heat, 4 Forest, 5 Lava |
+| `/temperature?kelvin=2000-6500` | a white by colour temperature |
+| `/speed?value=1-10` | effect speed |
+| `/sleep?minutes=0-120` | sleep timer (`0` cancels it) |
 
 ## Over-the-air (OTA) updates
 
@@ -284,6 +349,7 @@ git checkout v3.0.4
 
 | Version | Highlights |
 |---|---|
+| 4.1.0 | Lighting and effects: smooth fades and Home Assistant transitions; new modes Fireplace, Breathe, Twinkle, Comet, Reading light, Sunrise and Night light; effect speed; sleep timer; whites by colour temperature (HA, Alexa, web page). Saved settings from 4.0 carry over |
 | 4.0.0 | **Adafruit IO removed; Home Assistant integration** through a local MQTT broker with automatic discovery (light with effects, palette selector, diagnostic sensors, availability). `LAMP_NAME` and `MQTT_TOPIC` replace `ALEXA_NAME` and `FEED_GROUP`; `secrets.h` uses `MQTT_USER`/`MQTT_PASSWORD`. No more TLS certificates or NTP. Uses ArduinoJson |
 | 3.5.0 | Local Alexa control (Hue bulb emulation with Espalexa): on/off, brightness and colour by voice; Alexa name on the web page and status report |
 | 3.4.1 | Settings moved to `config.h`, with support for several lamps; optional power limit; web page shows the lamp's name; code comments written for beginners |
@@ -301,7 +367,7 @@ The sketch is commented for people learning C and C++, with an explanation the f
 
 1. **`setup()` and `loop()`** (section 3): what runs once at start-up and what repeats forever.
 2. **`lampChanged()`** (section 4): every change goes through it.
-3. **`drawFrame()`** (section 6): the non-blocking timer, and how a frame is drawn.
+3. **`drawFrame()`** and **`updateFade()`** (section 6): the non-blocking timer, how a frame is drawn, and how fades glide from one value to the next. The effects below them (`drawComet()`, `drawSunrise()`…) are short and good to experiment with.
 4. **`onMqttMessage()`** and **`publishDiscovery()`** (section 8): how a Home Assistant command becomes a change, and how the lamp describes itself to Home Assistant.
 5. **`startWebServer()`** (section 10), and the JavaScript in `web_page.h`: how the web page talks to the lamp.
 6. **`onAlexaCommand()`** (section 9): how a voice command becomes the same kind of change.

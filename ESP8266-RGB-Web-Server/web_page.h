@@ -8,7 +8,8 @@
 // to the browser, and from then on the JavaScript runs *in the browser*, not
 // on the ESP8266. It talks to the lamp through small addresses that answer
 // with JSON (see section 10 of the sketch):
-//   /state, /power, /colour, /brightness, /mode, /palette
+//   /state, /power, /colour, /brightness, /mode, /palette,
+//   /temperature, /speed, /sleep
 // It asks /state every few seconds, so changes made by Alexa or Home Assistant show up too.
 // Colour selection uses the browser's built-in <input type="color"> picker.
 //
@@ -77,6 +78,12 @@ static const char WEB_PAGE[] PROGMEM = R"page(<!doctype html>
   </section>
 
   <section>
+    <h2>White <span id="kelvin-value"></span></h2>
+    <input type="range" id="kelvin" min="2000" max="6500" step="100" aria-label="White temperature">
+    <p class="hint">Warm (left) to daylight (right). Also switches to Solid colour.</p>
+  </section>
+
+  <section>
     <h2>Brightness <span id="brightness-value"></span></h2>
     <input type="range" id="brightness" min="1" max="255" aria-label="Brightness">
   </section>
@@ -93,6 +100,17 @@ static const char WEB_PAGE[] PROGMEM = R"page(<!doctype html>
   </section>
 
   <section>
+    <h2>Effect speed <span id="speed-value"></span></h2>
+    <input type="range" id="speed" min="1" max="10" step="1" aria-label="Effect speed">
+  </section>
+
+  <section>
+    <h2>Sleep timer <span id="sleep-value"></span></h2>
+    <div class="grid" id="sleep"></div>
+    <p class="hint">Fades off slowly when the time is up.</p>
+  </section>
+
+  <section>
     <h2>Network</h2>
     <dl id="network"></dl>
   </section>
@@ -102,8 +120,12 @@ static const char WEB_PAGE[] PROGMEM = R"page(<!doctype html>
   // Mode numbers and button labels. The numbers must match MODE_... in the sketch.
   const MODES = [
     [1, 'Solid colour'], [2, 'Colour fade'], [3, 'Rainbow'],
-    [4, 'Random'], [5, 'Palette, smooth'], [6, 'Palette, stepped'], [7, 'Candle']
+    [4, 'Random'], [5, 'Palette, smooth'], [6, 'Palette, stepped'], [7, 'Candle'],
+    [8, 'Fireplace'], [9, 'Breathe'], [10, 'Twinkle'], [11, 'Comet'],
+    [12, 'Reading light'], [13, 'Sunrise'], [14, 'Night light']
   ];
+  // Sleep timer buttons: [minutes, label]. 0 cancels the timer.
+  const SLEEP_CHOICES = [[0, 'Off'], [15, '15 min'], [30, '30 min'], [60, '1 hour'], [90, '90 min']];
   // el('status') is shorthand for "the element with id=status". `id => ...` is an arrow function.
   const el = id => document.getElementById(id);
   let paletteNames = null;   // filled in from the lamp's first answer
@@ -163,6 +185,13 @@ static const char WEB_PAGE[] PROGMEM = R"page(<!doctype html>
     if (document.activeElement !== el('colour')) el('colour').value = s.colour;
     if (document.activeElement !== el('brightness')) el('brightness').value = s.brightness;
     el('brightness-value').textContent = Math.round(s.brightness * 100 / 255) + '%';
+    // kelvin is 0 when an RGB colour was picked rather than a white
+    if (document.activeElement !== el('kelvin') && s.kelvin) el('kelvin').value = s.kelvin;
+    el('kelvin-value').textContent = s.kelvin ? s.kelvin + ' K' : '';
+    if (document.activeElement !== el('speed')) el('speed').value = s.speed;
+    el('speed-value').textContent = s.speed + ' / 10';
+    el('sleep-value').textContent = s.sleep ? s.sleep + ' min left' : 'off';
+    [...el('sleep').children].forEach((b, i) => b.classList.toggle('active', SLEEP_CHOICES[i][0] === 0 && !s.sleep));
 
     const rows = [
       ['Address', s.host + '.local \u00b7 ' + s.ip],
@@ -191,6 +220,9 @@ static const char WEB_PAGE[] PROGMEM = R"page(<!doctype html>
   el('power-off').addEventListener('click', () => send('power?on=0'));
   el('colour').addEventListener('input', throttle(() => send('colour?hex=' + el('colour').value.slice(1)), 150));
   el('brightness').addEventListener('input', throttle(() => send('brightness?value=' + el('brightness').value), 150));
+  el('kelvin').addEventListener('input', throttle(() => send('temperature?kelvin=' + el('kelvin').value), 150));
+  el('speed').addEventListener('input', throttle(() => send('speed?value=' + el('speed').value), 150));
+  SLEEP_CHOICES.forEach(([minutes, label]) => el('sleep').appendChild(makeButton(label, () => send('sleep?minutes=' + minutes))));
 
   // Start: ask for the state now, then every 5 seconds while the page is visible
   send('state');

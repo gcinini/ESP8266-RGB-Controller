@@ -1,5 +1,5 @@
 /*
-  ESP8266 RGB Controller  v4.0.0
+  ESP8266 RGB Controller  v4.1.0
 
   Wi-Fi controller for a WS2812B LED lamp on a Wemos D1 Mini (ESP8266).
   Control it from its own web page, by voice through an Amazon Echo (Alexa),
@@ -27,7 +27,7 @@
     3. setup() and loop()
     4. Lamp control                       (functions that change the state)
     5. Colours                            (turning "Hot Pink" or "#FF8800" into RGB)
-    6. Drawing                            (turning the state into LED colours)
+    6. Drawing                            (turning the state into LED colours, fades, effects)
     7. Saving settings                    (so the lamp remembers after a power cut)
     8. Wi-Fi, OTA and Home Assistant     (networking)
     9. Alexa                              (voice control through an Echo)
@@ -101,7 +101,7 @@
 // A `const` variable can't be changed after it is created. The compiler
 // stops you if you try. `const char *` is a pointer to text: in C, text is
 // stored as a row of characters, and the variable holds where it starts.
-const char *FIRMWARE_VERSION = "4.0.0";
+const char *FIRMWARE_VERSION = "4.1.0";
 
 
 // ===========================================================================
@@ -124,8 +124,16 @@ const uint8_t MODE_RANDOM          = 4;   // a different palette every few secon
 const uint8_t MODE_PALETTE_SMOOTH  = 5;   // chosen palette, blended
 const uint8_t MODE_PALETTE_STEPPED = 6;   // chosen palette, hard steps
 const uint8_t MODE_CANDLE          = 7;   // flickering candle at the bottom of the lamp
+// Added in v4.1:
+const uint8_t MODE_FIREPLACE       = 8;   // glowing embers along the whole bar
+const uint8_t MODE_BREATHE         = 9;   // the chosen colour slowly brightens and dims
+const uint8_t MODE_TWINKLE         = 10;  // stars twinkling on a dim background
+const uint8_t MODE_COMET           = 11;  // a bright dot with a fading tail, bouncing end to end
+const uint8_t MODE_READING         = 12;  // warm white, bright in the middle and dim at the ends
+const uint8_t MODE_SUNRISE         = 13;  // wake-up: dark red to warm white over SUNRISE_MINUTES
+const uint8_t MODE_NIGHT           = 14;  // very dim amber night light
 const uint8_t MODE_MIN = MODE_SOLID;
-const uint8_t MODE_MAX = MODE_CANDLE;
+const uint8_t MODE_MAX = MODE_NIGHT;
 
 // An array is a numbered list. MODE_NAMES[3] is "Rainbow". Index 0 is
 // unused, so the index matches the mode number. `const char *const` means
@@ -133,8 +141,14 @@ const uint8_t MODE_MAX = MODE_CANDLE;
 // Home Assistant shows these names in its Effect list, and sends one back to
 // choose a mode, so changing a name here changes it there too.
 const char *const MODE_NAMES[] = {
-  "", "Solid colour", "Colour fade", "Rainbow", "Random", "Palette, smooth", "Palette, stepped", "Candle"
+  "", "Solid colour", "Colour fade", "Rainbow", "Random", "Palette, smooth", "Palette, stepped", "Candle",
+  "Fireplace", "Breathe", "Twinkle", "Comet", "Reading light", "Sunrise", "Night light"
 };
+
+// Effect speed 1-10 becomes "how far the animation clock moves each frame".
+// 256 (speed 5) is one step of animationPhase per frame, the speed of v4.0.
+const uint16_t SPEED_STEPS[] = { 0, 64, 96, 128, 176, 256, 352, 448, 576, 768, 1024 };
+const uint8_t  SPEED_MIN = 1, SPEED_MAX = 10;
 
 // --- Palettes -----------------------------------------------------------------
 // A palette is a list of 16 colours that FastLED blends between. CloudColors_p
@@ -167,10 +181,13 @@ struct Lamp {
   uint8_t palette;      // index into PALETTES
   CRGB    colour;       // the colour as picked (gamma is applied when drawing)
   uint8_t brightness;   // 1-255, applied through FastLED.setBrightness()
+  uint8_t speed;        // effect speed, SPEED_MIN-SPEED_MAX
+  uint16_t kelvin;      // white temperature if one was chosen (e.g. 2700), or 0 for a picked RGB colour
 };
 
 // The one and only lamp, with its starting values (from config.h).
-Lamp lamp = { true, MODE_SOLID, 0, CRGB(DEFAULT_RED, DEFAULT_GREEN, DEFAULT_BLUE), DEFAULT_BRIGHTNESS };
+Lamp lamp = { true, MODE_SOLID, 0, CRGB(DEFAULT_RED, DEFAULT_GREEN, DEFAULT_BLUE), DEFAULT_BRIGHTNESS,
+              DEFAULT_SPEED, 0 };
 
 
 // --- Other global variables -----------------------------------------------------
@@ -179,7 +196,29 @@ CRGB          leds[LED_COUNT];        // one colour per LED; FastLED sends this 
 CRGBPalette16 activePalette;          // the palette the current mode is drawing with
 TBlendType    activeBlend = LINEARBLEND;   // LINEARBLEND = smooth, NOBLEND = hard steps
 CRGB          solidColour;            // lamp.colour after gamma correction (see lampChanged)
-uint8_t       animationPhase = 0;     // how far an animation has moved; wraps 255 -> 0 by itself
+uint32_t      animationClock = 0;     // grows every frame by SPEED_STEPS[lamp.speed]
+uint8_t       animationPhase = 0;     // animationClock / 256: how far an animation has moved, wraps 255 -> 0
+
+// --- Fades ------------------------------------------------------------------------
+// Changes don't jump: the brightness actually shown (outputLevel) and the solid
+// colour actually shown (colourShown) glide to their new values over fadeLength
+// milliseconds. lampChanged() starts a fade; drawFrame() moves it along.
+uint8_t  outputLevel = 0;             // brightness on the strip right now, 0-255 (0 = dark)
+uint8_t  fadeFrom = 0, fadeTo = 0;    // brightness at the start and end of the fade
+CRGB     colourShown;                 // solid colour on the strip right now
+CRGB     colourFrom;                  // solid colour at the start of the fade
+uint32_t fadeStartAt = 0;             // millis() when the fade started
+uint32_t fadeLength = 0;              // how long the fade lasts, in ms
+// How long the *next* change should fade. Home Assistant can set it for one
+// command (its "transition"); everything else uses DEFAULT_FADE_MS.
+uint32_t requestedFadeMs = DEFAULT_FADE_MS;
+bool     transitionGiven = false;     // true while handling a command that named a transition
+
+// --- Timers for Sunrise and the sleep timer ---------------------------------------
+uint32_t sunriseStartAt = 0;          // millis() when Sunrise started
+uint32_t sunriseLength = 0;           // how long it lasts, in ms
+uint32_t sleepStartAt = 0;            // millis() when the sleep timer was set
+uint32_t sleepLength = 0;             // 0 = no sleep timer running
 
 // These are *objects*, a C++ idea: a variable that carries its own functions
 // (called methods), used like web.send(...) or mqtt.connect(...).
@@ -201,6 +240,8 @@ EspalexaDevice  *alexaLight = nullptr;
 String topicState;          // <topic>/state         lamp -> Home Assistant: what the lamp is doing
 String topicSet;            // <topic>/set           Home Assistant -> lamp: light commands
 String topicPaletteSet;     // <topic>/palette/set   Home Assistant -> lamp: choose a palette
+String topicSpeedSet;       // <topic>/speed/set     Home Assistant -> lamp: effect speed 1-10
+String topicSleepSet;       // <topic>/sleep/set     Home Assistant -> lamp: sleep timer in minutes (0 = off)
 String topicAvailability;   // <topic>/availability  "online" or "offline"
 // Two pieces of text written side by side are joined into one by the
 // compiler, so this is "homeassistant/status". Home Assistant says "online"
@@ -232,14 +273,28 @@ void setMode(uint8_t mode);
 void setPalette(uint8_t id);
 void setColour(CRGB colour);
 void setBrightness(uint8_t level);
+void setColourTemperature(uint16_t kelvin);
+void setSpeed(uint8_t speed);
+void setSleepTimer(uint16_t minutes);
+void serviceSleepTimer();
+uint16_t sleepMinutesLeft();
 void lampChanged();
 void preparePalette();
 bool colourFromText(String text, CRGB &out);
+CRGB kelvinToRgb(uint16_t kelvin);
 
 // Drawing
 void drawFrame();
+void updateFade(uint32_t now);
+uint16_t bySpeed(uint16_t amount);
 void drawPaletteAlongStrip();
 void drawCandle();
+void drawFireplace();
+void drawBreathe();
+void drawTwinkle();
+void drawComet();
+void drawReadingLight();
+void drawSunrise(uint32_t now);
 void pickRandomPalette();
 
 // Status
@@ -255,6 +310,8 @@ void startOta();
 void serviceMqtt();
 void onMqttMessage(char *topic, byte *payload, unsigned int length);
 void handleLightCommand(byte *payload, unsigned int length);
+void applyLightCommand(JsonDocument &command);
+long payloadToNumber(byte *payload, unsigned int length);
 bool publishJson(const String &topic, JsonDocument &doc);
 void addDeviceInfo(JsonDocument &doc);
 void publishDiscovery();
@@ -305,6 +362,8 @@ void setup() {
   topicState        = String(MQTT_TOPIC) + "/state";
   topicSet          = String(MQTT_TOPIC) + "/set";
   topicPaletteSet   = String(MQTT_TOPIC) + "/palette/set";
+  topicSpeedSet     = String(MQTT_TOPIC) + "/speed/set";
+  topicSleepSet     = String(MQTT_TOPIC) + "/sleep/set";
   topicAvailability = String(MQTT_TOPIC) + "/availability";
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setCallback(onMqttMessage);   // "call onMqttMessage() whenever a message arrives"
@@ -323,6 +382,7 @@ void loop() {
   serviceMqtt();           // any Home Assistant messages? reconnect if needed
   drawFrame();             // draw the next animation frame, if it's time
   saveSettingsIfDue();     // save settings, if it's time
+  serviceSleepTimer();     // switch off if the sleep timer has run out
   publishToHomeAssistantIfDue();   // announce the lamp or report its state, if it's time
 }
 
@@ -336,6 +396,7 @@ void loop() {
 
 void setPower(bool on) {
   lamp.on = on;
+  if (!on) sleepLength = 0;   // switching off cancels the sleep timer
   // `condition ? a : b` is the ternary operator: a if true, b if false.
   Serial.println(on ? "Lamp on" : "Lamp off");
   lampChanged();
@@ -345,7 +406,17 @@ void setMode(uint8_t mode) {
   if (mode < MODE_MIN || mode > MODE_MAX) return;   // || means "or"; ignore unknown modes
   lamp.mode = mode;
   lamp.on = true;
-  Serial.printf("Mode %s\n", MODE_NAMES[mode]);   // %s in printf is replaced by text
+  if (mode == MODE_SUNRISE) {
+    // Sunrise lasts SUNRISE_MINUTES, unless Home Assistant sent a transition
+    // with the command: then that is the length ("transition: 1800" = 30 min).
+    // UL makes the numbers "unsigned long", so 20 * 60000 can't overflow.
+    sunriseLength = (transitionGiven && requestedFadeMs > 0) ? requestedFadeMs
+                                                             : SUNRISE_MINUTES * 60000UL;
+    sunriseStartAt = millis();
+    Serial.printf("Mode Sunrise over %lu min\n", (unsigned long)(sunriseLength / 60000));
+  } else {
+    Serial.printf("Mode %s\n", MODE_NAMES[mode]);   // %s in printf is replaced by text
+  }
   lampChanged();
 }
 
@@ -362,10 +433,24 @@ void setPalette(uint8_t id) {
 
 void setColour(CRGB colour) {
   lamp.colour = colour;
+  lamp.kelvin = 0;          // an RGB colour, not a white temperature
   lamp.mode = MODE_SOLID;
   lamp.on = true;
   // %02X prints a number as 2 hexadecimal digits, so 255 becomes FF.
   Serial.printf("Colour #%02X%02X%02X\n", colour.r, colour.g, colour.b);
+  lampChanged();
+}
+
+// A white of a given colour temperature, e.g. 2700 (warm) or 6500 (daylight).
+// It is shown like any solid colour, but the lamp remembers the kelvin value
+// so Home Assistant's colour-temperature picker shows it correctly.
+void setColourTemperature(uint16_t kelvin) {
+  kelvin = constrain(kelvin, MIN_KELVIN, MAX_KELVIN);
+  lamp.colour = kelvinToRgb(kelvin);
+  lamp.kelvin = kelvin;
+  lamp.mode = MODE_SOLID;
+  lamp.on = true;
+  Serial.printf("White %u K\n", kelvin);
   lampChanged();
 }
 
@@ -375,16 +460,63 @@ void setBrightness(uint8_t level) {
   lampChanged();
 }
 
+void setSpeed(uint8_t speed) {
+  lamp.speed = constrain(speed, SPEED_MIN, SPEED_MAX);
+  Serial.printf("Speed %u\n", lamp.speed);
+  lampChanged();
+}
+
+// Sleep timer: switch off (with a slow fade) after `minutes`. 0 cancels it.
+// It isn't saved in flash: after a power cut there's no timer running.
+void setSleepTimer(uint16_t minutes) {
+  if (minutes > SLEEP_MAX_MINUTES) minutes = SLEEP_MAX_MINUTES;
+  sleepLength = minutes * 60000UL;
+  sleepStartAt = millis();
+  if (minutes == 0) Serial.println("Sleep timer off");
+  else              Serial.printf("Sleep timer: off in %u min\n", minutes);
+  statePending = true;           // tell Home Assistant (no need to save anything)
+  lastChangeAt = millis();
+}
+
+// Called from loop(): has the sleep timer run out?
+void serviceSleepTimer() {
+  if (sleepLength == 0) return;                          // no timer running
+  if (millis() - sleepStartAt < sleepLength) return;     // not yet
+  sleepLength = 0;
+  Serial.println("Sleep timer finished");
+  requestedFadeMs = SLEEP_FADE_SECONDS * 1000UL;         // fade off slowly...
+  setPower(false);
+  requestedFadeMs = DEFAULT_FADE_MS;                     // ...then back to normal fades
+}
+
+// Whole minutes left on the sleep timer, rounded up (0 = no timer).
+uint16_t sleepMinutesLeft() {
+  if (sleepLength == 0) return 0;
+  uint32_t elapsed = millis() - sleepStartAt;
+  if (elapsed >= sleepLength) return 0;
+  return (sleepLength - elapsed + 59999) / 60000;        // + 59999 rounds up
+}
+
 // Called after every change: applies it and schedules the delayed jobs.
 void lampChanged() {
-  FastLED.setBrightness(lamp.brightness);
-
   // Gamma correction. Our eyes don't see brightness in a straight line: an
   // LED at half power looks much brighter than "half". applyGamma_video()
   // bends the numbers so colours picked on a screen look right on the LEDs.
   solidColour = CRGB(applyGamma_video(lamp.colour.r, COLOUR_GAMMA),
                      applyGamma_video(lamp.colour.g, COLOUR_GAMMA),
                      applyGamma_video(lamp.colour.b, COLOUR_GAMMA));
+
+  // Start a fade from what is showing now to the new brightness and colour.
+  // Off fades to 0; Night light always uses its own very low level.
+  fadeFrom = outputLevel;
+  if (!lamp.on)                       fadeTo = 0;
+  else if (lamp.mode == MODE_NIGHT)   fadeTo = NIGHT_LIGHT_LEVEL;
+  else                                fadeTo = lamp.brightness;
+  colourFrom = colourShown;
+  fadeStartAt = millis();
+  // Sunrise does its own slow ramp, so the fade into it is a normal short one.
+  fadeLength = (lamp.mode == MODE_SUNRISE) ? DEFAULT_FADE_MS : requestedFadeMs;
+
   preparePalette();
   syncAlexa();   // so the Alexa app shows what the lamp is really doing
 
@@ -481,6 +613,34 @@ bool colourFromText(String text, CRGB &out) {
   return true;
 }
 
+// Turns a white colour temperature (kelvin) into red, green and blue.
+// The table holds the colour of a glowing "black body" every 500 K; values in
+// between are blended from the two nearest rows. Lower = warmer (more orange),
+// higher = cooler (more blue).
+CRGB kelvinToRgb(uint16_t kelvin) {
+  static const uint8_t TABLE[][3] = {
+    { 255, 137,  14 },   // 2000 K  candle
+    { 255, 161,  72 },   // 2500 K
+    { 255, 180, 107 },   // 3000 K  warm white bulb
+    { 255, 196, 137 },   // 3500 K
+    { 255, 209, 163 },   // 4000 K  neutral white
+    { 255, 219, 186 },   // 4500 K
+    { 255, 228, 206 },   // 5000 K
+    { 255, 236, 224 },   // 5500 K
+    { 255, 243, 239 },   // 6000 K
+    { 255, 249, 253 },   // 6500 K  daylight
+  };
+  kelvin = constrain(kelvin, 2000, 6500);
+  uint16_t offset = kelvin - 2000;     // 0-4500
+  uint8_t row = offset / 500;          // which table row is just below
+  if (row >= 9) return CRGB(TABLE[9][0], TABLE[9][1], TABLE[9][2]);
+  // How far between this row and the next, as 0-255 (blend() wants 0-255).
+  uint8_t between = (offset % 500) * 255 / 500;
+  CRGB low(TABLE[row][0], TABLE[row][1], TABLE[row][2]);
+  CRGB high(TABLE[row + 1][0], TABLE[row + 1][1], TABLE[row + 1][2]);
+  return blend(low, high, between);
+}
+
 
 // ===========================================================================
 // 6. Drawing - one frame per call, at most every FRAME_INTERVAL_MS
@@ -490,7 +650,6 @@ bool colourFromText(String text, CRGB &out) {
 // remembers when it last drew a frame.
 void drawFrame() {
   static uint32_t lastFrameAt = 0;
-  static uint32_t frameNumber = 0;
   static uint32_t randomSince = 0;
 
   // The non-blocking timer: "has FRAME_INTERVAL_MS passed since the last
@@ -501,25 +660,32 @@ void drawFrame() {
   uint32_t now = millis();
   if (now - lastFrameAt < FRAME_INTERVAL_MS) return;
   lastFrameAt = now;
-  frameNumber++;   // ++ adds 1
 
-  if (!lamp.on) {
+  updateFade(now);   // move any fade along, and set the strip's brightness
+
+  // Off, and finished fading out: nothing to draw.
+  if (!lamp.on && outputLevel == 0) {
     FastLED.clear();   // all LEDs black...
     FastLED.show();    // ...and send that to the strip
     return;
   }
 
+  // The animation clock. At speed 5 it adds 256 per frame, so animationPhase
+  // (the clock divided by 256) goes up by exactly 1 per frame; slower speeds
+  // add less, faster speeds more. >> 8 shifts the bits right by 8, which is
+  // a quick way to divide by 256.
+  animationClock += SPEED_STEPS[lamp.speed];
+  animationPhase = animationClock >> 8;
+
   switch (lamp.mode) {
     case MODE_SOLID:
-      fill_solid(leds, LED_COUNT, solidColour);
+      fill_solid(leds, LED_COUNT, colourShown);
       break;
 
     case MODE_FADE:
-      // One colour for the whole lamp, moving one palette step every 4 frames
-      // (about 20 s per cycle). % is the remainder after dividing, so
-      // frameNumber % 4 == 0 is true on every 4th frame.
-      if (frameNumber % 4 == 0) animationPhase++;
-      fill_solid(leds, LED_COUNT, ColorFromPalette(activePalette, animationPhase, 255, activeBlend));
+      // One colour for the whole lamp, drifting a quarter as fast as the
+      // other animations (>> 10 = divide by 1024): about 20 s per cycle.
+      fill_solid(leds, LED_COUNT, ColorFromPalette(activePalette, animationClock >> 10, 255, activeBlend));
       break;
 
     case MODE_RANDOM:
@@ -527,24 +693,56 @@ void drawFrame() {
         randomSince = now;
         pickRandomPalette();
       }
-      animationPhase++;
       drawPaletteAlongStrip();
       break;
 
-    case MODE_CANDLE:
-      drawCandle();
+    case MODE_CANDLE:    drawCandle();          break;
+    case MODE_FIREPLACE: drawFireplace();       break;
+    case MODE_BREATHE:   drawBreathe();         break;
+    case MODE_TWINKLE:   drawTwinkle();         break;
+    case MODE_COMET:     drawComet();           break;
+    case MODE_READING:   drawReadingLight();    break;
+    case MODE_SUNRISE:   drawSunrise(now);      break;
+
+    case MODE_NIGHT:
+      // The colour is fixed; the very low brightness comes from lampChanged().
+      fill_solid(leds, LED_COUNT, CRGB(NIGHT_LIGHT_RED, NIGHT_LIGHT_GREEN, NIGHT_LIGHT_BLUE));
       break;
 
     default:   // rainbow and the two palette modes
-      animationPhase++;
       drawPaletteAlongStrip();
       break;
   }
   FastLED.show();   // nothing appears on the strip until show() sends the leds[] array
 }
 
+// Moves the current fade one step and gives FastLED the brightness to use.
+// progress runs from 0 (start of the fade) to 255 (finished);
+// lerp8by8(a, b, progress) is FastLED's "the value progress/255 of the way
+// from a to b", and blend() does the same for colours.
+void updateFade(uint32_t now) {
+  uint32_t elapsed = now - fadeStartAt;
+  if (fadeLength == 0 || elapsed >= fadeLength) {
+    outputLevel = fadeTo;          // fade finished (or there wasn't one)
+    colourShown = solidColour;
+  } else {
+    uint8_t progress = (uint64_t)elapsed * 255 / fadeLength;   // uint64_t: room for long fades
+    outputLevel = lerp8by8(fadeFrom, fadeTo, progress);
+    colourShown = blend(colourFrom, solidColour, progress);
+  }
+  FastLED.setBrightness(outputLevel);
+}
+
+// Scales a per-frame step by the effect speed: the same amount at speed 5,
+// a quarter of it at speed 1, four times it at speed 10. Never 0, so an
+// effect never freezes.
+uint16_t bySpeed(uint16_t amount) {
+  uint32_t scaled = (uint32_t)amount * SPEED_STEPS[lamp.speed] / 256;
+  return scaled > 0 ? scaled : 1;
+}
+
 // Spreads the active palette along the strip, shifted by the animation phase.
-// Because animationPhase grows by 1 every frame, the colours appear to move.
+// Because animationPhase grows every frame (by 1 at speed 5), the colours appear to move.
 void drawPaletteAlongStrip() {
   const uint8_t spacing = 4;   // palette steps between neighbouring LEDs
   for (uint16_t i = 0; i < LED_COUNT; i++) {
@@ -566,7 +764,7 @@ void drawCandle() {
   static uint16_t noiseClock = 0;
   static uint8_t draught = 0;          // how far the flame is currently dipping
 
-  noiseClock += 7;                     // += adds to the variable: noiseClock = noiseClock + 7
+  noiseClock += bySpeed(7);            // += adds to the variable: noiseClock = noiseClock + 7 (at speed 5)
   if (draught > 0) {
     draught = qsub8(draught, 5);       // recover over a few hundred milliseconds
   } else if (random8() == 0) {         // random8() is 0-255, so 1 frame in 256: about every 5 s
@@ -600,6 +798,103 @@ void drawCandle() {
     uint8_t index = CANDLE_AT_LED_ZERO ? i : (LED_COUNT - 1 - i);
     leds[index] = colour;
   }
+}
+
+// --- Effects added in v4.1 ----------------------------------------------------------
+
+// Fireplace: glowing embers along the whole bar. Each LED follows its own slow
+// noise (so neighbours glow together, like a bed of coals), with a little
+// random crackle on top, coloured through FastLED's "heat" palette
+// (dark red -> orange -> yellow). The level is kept between 30 and 180 so it
+// never goes fully black or white-hot.
+void drawFireplace() {
+  static uint16_t noiseClock = 0;
+  noiseClock += bySpeed(9);
+  for (uint16_t i = 0; i < LED_COUNT; i++) {
+    uint8_t heat = inoise8(i * 60, noiseClock);           // smooth 0-255 per LED
+    heat = qadd8(scale8(heat, 220), random8(30));          // plus a little crackle
+    leds[i] = ColorFromPalette(HeatColors_p, qadd8(30, scale8(heat, 150)), 255, LINEARBLEND);
+  }
+}
+
+// Breathe: the chosen colour slowly brightens and dims, like breathing.
+// cubicwave8() turns the steadily rising animationPhase into a smooth
+// up-and-down wave (0 -> 255 -> 0); at speed 5 one breath takes about 5 s.
+void drawBreathe() {
+  uint8_t wave = cubicwave8(animationPhase);
+  uint8_t level = 30 + scale8(wave, 225);   // never quite dark: 30-255
+  CRGB colour = colourShown;
+  colour.nscale8_video(level);              // nscale8_video dims without ever reaching 0
+  fill_solid(leds, LED_COUNT, colour);
+}
+
+// Twinkle: a dim background in the chosen colour, with "stars" that light up
+// and slowly fade back. Unlike the other effects it builds on the previous
+// frame: every LED is nudged towards the background a little each frame.
+void drawTwinkle() {
+  CRGB background = colourShown;
+  background.nscale8_video(26);             // about 10% of the colour
+  for (uint16_t i = 0; i < LED_COUNT; i++) {
+    nblend(leds[i], background, 8);         // move 8/255 of the way towards the background
+  }
+  // A new star now and then; more often at higher speeds.
+  if (random8() < 6 + lamp.speed * 4) {
+    uint16_t i = random16(LED_COUNT);
+    leds[i] = blend(colourShown, CRGB::White, 140);   // a pale, sparkly version of the colour
+  }
+}
+
+// Comet: a bright dot in the chosen colour that travels end to end and back,
+// leaving a fading tail. fadeToBlackBy() dims every LED a little each frame,
+// so the places the comet has been fade out behind it.
+void drawComet() {
+  fadeToBlackBy(leds, LED_COUNT, 40);
+  // triwave8() turns the rising phase into 0 -> 255 -> 0 (there and back);
+  // scale that to an LED position 0 .. LED_COUNT-1.
+  uint16_t position = (uint16_t)triwave8(animationPhase) * (LED_COUNT - 1) / 255;
+  leds[position] = colourShown;
+}
+
+// Reading light: a white of READING_LIGHT_KELVIN, full brightness in the
+// middle of the bar and dimmer towards the ends.
+void drawReadingLight() {
+  CRGB white = kelvinToRgb(READING_LIGHT_KELVIN);
+  white = CRGB(applyGamma_video(white.r, COLOUR_GAMMA), applyGamma_video(white.g, COLOUR_GAMMA),
+               applyGamma_video(white.b, COLOUR_GAMMA));
+  for (uint16_t i = 0; i < LED_COUNT; i++) {
+    // Distance from the middle: 0 in the centre, 255 at either end.
+    // abs() gives the size of a number without its sign: abs(-5) is 5.
+    int32_t fromCentre = abs((int32_t)(2 * i) - (int32_t)(LED_COUNT - 1));
+    uint8_t distance = (LED_COUNT > 1) ? fromCentre * 255 / (LED_COUNT - 1) : 0;
+    // ease8InOutQuad keeps the middle bright for longer before it falls off.
+    uint8_t level = 255 - scale8(ease8InOutQuad(distance), 210);   // 255 in the middle, 45 at the ends
+    leds[i] = white;
+    leds[i].nscale8_video(level);
+  }
+}
+
+// Sunrise: the whole bar goes from dark through deep red and orange to warm
+// white over sunriseLength, then stays at warm white. The colours come from a
+// "gradient palette": a list of (position, red, green, blue) stops that
+// FastLED blends between. Position 0 is the start of the sunrise, 255 the end.
+DEFINE_GRADIENT_PALETTE(SUNRISE_GRADIENT) {
+    0,   0,   0,   0,    // dark
+   50,  40,   2,   0,    // first glow: very dim red
+  110, 140,  20,   0,    // deep red
+  170, 255,  80,   5,    // orange
+  220, 255, 150,  50,    // golden
+  255, 255, 190, 110,    // warm white
+};
+
+void drawSunrise(uint32_t now) {
+  static const CRGBPalette16 sunrise = SUNRISE_GRADIENT;
+  uint32_t elapsed = now - sunriseStartAt;
+  uint8_t progress = (sunriseLength == 0 || elapsed >= sunriseLength)
+                     ? 255 : (uint64_t)elapsed * 255 / sunriseLength;
+  // scale8(progress, 240): a 16-colour palette's last colour sits at position
+  // 240. Positions above that blend back towards the *first* colour (black),
+  // so the sunrise would end dark - stopping at 240 keeps it at warm white.
+  fill_solid(leds, LED_COUNT, ColorFromPalette(sunrise, scale8(progress, 240), 255, LINEARBLEND));
 }
 
 // Random mode: usually one of FastLED's built-in palettes, sometimes a freshly
@@ -637,30 +932,43 @@ void pickRandomPalette() {
 
 // Change this number whenever StoredSettings changes, so old saved data in
 // the wrong format is ignored instead of being misread.
-const uint8_t SETTINGS_MARKER = 0xC1;   // 0x means hexadecimal: 0xC1 = 193
+// v4.1 added `speed` and `kelvin` at the end and moved from 0xC1 to 0xC2.
+// Because the first seven bytes didn't change, settings saved by an older
+// version (0xC1) can still be read - see loadSettings().
+const uint8_t SETTINGS_MARKER     = 0xC2;   // 0x means hexadecimal: 0xC2 = 194
+const uint8_t SETTINGS_MARKER_OLD = 0xC1;   // what v3.x and v4.0 wrote
 
 struct StoredSettings {
   uint8_t marker;
   uint8_t mode, palette, brightness;
   uint8_t red, green, blue;
+  uint8_t speed;      // new in v4.1
+  uint16_t kelvin;    // new in v4.1
 };
 
 void loadSettings() {
   EEPROM.begin(sizeof(StoredSettings));   // reserve exactly as many bytes as we store
   StoredSettings s = {};                  // = {} starts every field at 0
   EEPROM.get(0, s);                       // copy the saved bytes into s
-  if (s.marker == SETTINGS_MARKER) {
+  if (s.marker == SETTINGS_MARKER || s.marker == SETTINGS_MARKER_OLD) {
     // Only accept values that make sense; a garbled byte keeps the default.
     if (s.mode >= MODE_MIN && s.mode <= MODE_MAX) lamp.mode = s.mode;
     if (s.palette < PALETTE_COUNT) lamp.palette = s.palette;
     if (s.brightness > 0) lamp.brightness = s.brightness;
     lamp.colour = CRGB(s.red, s.green, s.blue);
+    if (s.marker == SETTINGS_MARKER) {    // only the new format has these
+      if (s.speed >= SPEED_MIN && s.speed <= SPEED_MAX) lamp.speed = s.speed;
+      if (s.kelvin >= MIN_KELVIN && s.kelvin <= MAX_KELVIN) lamp.kelvin = s.kelvin;
+    }
     Serial.println("Settings restored");
   } else {
     Serial.println("No saved settings - using defaults");
   }
+  // Never restart a sunrise after a power cut (it might be the middle of the
+  // night): come back in Solid colour instead.
+  if (lamp.mode == MODE_SUNRISE) lamp.mode = MODE_SOLID;
   lamp.on = true;
-  lampChanged();
+  lampChanged();         // fades up from dark, so power-up is gentle too
   savePending = false;   // nothing new to save yet
 }
 
@@ -669,7 +977,7 @@ void saveSettingsIfDue() {
   savePending = false;
 
   StoredSettings wanted = { SETTINGS_MARKER, lamp.mode, lamp.palette, lamp.brightness,
-                            lamp.colour.r, lamp.colour.g, lamp.colour.b };
+                            lamp.colour.r, lamp.colour.g, lamp.colour.b, lamp.speed, lamp.kelvin };
   StoredSettings current = {};
   EEPROM.get(0, current);
   // memcmp compares two blocks of memory byte by byte; 0 means identical.
@@ -735,6 +1043,8 @@ void startOta() {
 //   Topic                          Direction           Contents
 //   bedlight/set                   HA -> lamp          {"state":"ON","brightness":128,...}
 //   bedlight/palette/set           HA -> lamp          Ocean
+//   bedlight/speed/set             HA -> lamp          5        (effect speed 1-10)
+//   bedlight/sleep/set             HA -> lamp          30       (sleep timer, minutes; 0 = off)
 //   bedlight/state                 lamp -> HA          {"state":"ON","effect":"Candle",...}
 //   bedlight/availability          lamp -> HA          online / offline
 //   homeassistant/status           HA -> lamp          online (when HA starts)
@@ -742,7 +1052,8 @@ void startOta() {
 //
 // Discovery is what makes the lamp appear in Home Assistant by itself. The
 // lamp publishes a description of each thing it offers (a light, a palette
-// selector and two diagnostic sensors), and Home Assistant creates them.
+// selector, speed and sleep-timer sliders and two diagnostic sensors), and
+// Home Assistant creates them.
 //
 // Messages can be *retained*: the broker keeps the last one on each topic
 // and hands it to anyone who subscribes later. Discovery, state and
@@ -777,6 +1088,8 @@ void serviceMqtt() {
     // .c_str() turns a String into plain C text, which the library expects.
     mqtt.subscribe(topicSet.c_str());
     mqtt.subscribe(topicPaletteSet.c_str());
+    mqtt.subscribe(topicSpeedSet.c_str());
+    mqtt.subscribe(topicSleepSet.c_str());
     mqtt.subscribe(HA_STATUS_TOPIC);
     mqtt.publish(topicAvailability.c_str(), "online", true);   // true = retained
     discoveryPending = true;   // (re)announce the lamp...
@@ -823,6 +1136,16 @@ void onMqttMessage(char *topic, byte *payload, unsigned int length) {
     return;
   }
 
+  if (topicSpeedSet == topic) {
+    setSpeed(constrain(payloadToNumber(payload, length), (long)SPEED_MIN, (long)SPEED_MAX));
+    return;
+  }
+
+  if (topicSleepSet == topic) {
+    setSleepTimer(constrain(payloadToNumber(payload, length), 0L, (long)SLEEP_MAX_MINUTES));
+    return;
+  }
+
   // Home Assistant has (re)started: it forgets nothing retained, but sending
   // the discovery and state again is what Home Assistant recommends.
   if (strcmp(topic, HA_STATUS_TOPIC) == 0 && length == 6 &&
@@ -837,7 +1160,10 @@ void onMqttMessage(char *topic, byte *payload, unsigned int length) {
 //   {"state":"ON"}
 //   {"state":"ON","brightness":77}
 //   {"state":"ON","color":{"r":255,"g":0,"b":128}}
+//   {"state":"ON","color_temp":2700}                 (white, in kelvin)
 //   {"state":"ON","effect":"Candle"}
+//   {"state":"OFF","transition":600}                 (fade out over 10 minutes)
+//   {"state":"ON","effect":"Sunrise","transition":1800}   (a 30-minute sunrise)
 // One command can carry several of these at once, so check each of them.
 void handleLightCommand(byte *payload, unsigned int length) {
   // A JsonDocument holds JSON that has been taken apart into its pieces.
@@ -850,12 +1176,33 @@ void handleLightCommand(byte *payload, unsigned int length) {
     return;
   }
 
+  // "transition" is in seconds (it may have decimals, e.g. 0.5). If it's
+  // there, every change in this command fades over that long instead of
+  // DEFAULT_FADE_MS. requestedFadeMs is put back afterwards, so the next
+  // change from the web page or Alexa uses the normal fade again.
+  if (command["transition"].is<float>()) {
+    float seconds = constrain(command["transition"].as<float>(), 0.0f, (float)MAX_TRANSITION_S);
+    requestedFadeMs = seconds * 1000;
+    transitionGiven = true;
+  }
+  applyLightCommand(command);
+  requestedFadeMs = DEFAULT_FADE_MS;
+  transitionGiven = false;
+}
+
+// Carries out the parts of a light command (see handleLightCommand).
+void applyLightCommand(JsonDocument &command) {
   // command["state"] reads one field. `| ""` means "or empty text if the
   // field is missing", so `state` is never a null pointer.
   const char *state = command["state"] | "";
   if (strcmp(state, "OFF") == 0) {   // strcmp() returns 0 when two texts are equal
     setPower(false);
     return;
+  }
+
+  // A white temperature in kelvin (we told Home Assistant to use kelvin).
+  if (command["color_temp"].is<int>()) {
+    setColourTemperature(command["color_temp"].as<int>());   // also selects Solid colour
   }
 
   // is<JsonObject>() checks that "color" exists and is a { ... } group.
@@ -886,6 +1233,16 @@ void handleLightCommand(byte *payload, unsigned int length) {
   // Any command other than OFF means the lamp should be on. (setColour and
   // setMode switch it on already; this covers a plain {"state":"ON"}.)
   if (!lamp.on) setPower(true);
+}
+
+// Turns a message like "5" or "30.0" into a whole number. Home Assistant's
+// number sliders send plain text, which may include ".0".
+long payloadToNumber(byte *payload, unsigned int length) {
+  char text[16];                                    // plenty for any number
+  unsigned int n = (length < sizeof(text) - 1) ? length : sizeof(text) - 1;
+  memcpy(text, payload, n);                         // copy the bytes...
+  text[n] = '\0';                                   // ...and add the end-of-text marker
+  return lround(atof(text));                        // atof reads decimals; lround rounds to whole
 }
 
 // Sends a JsonDocument to a topic as one retained message.
@@ -929,7 +1286,8 @@ void publishDiscovery() {
   String id = deviceId;
   bool ok = true;
 
-  // 1. The light: on/off, brightness, colour, and the modes as "effects".
+  // 1. The light: on/off, brightness, colour, white temperature, and the
+  //    modes as "effects". Fades ("transition") are supported by default.
   {   // the braces make `light` exist only inside this block, freeing its memory at the end
     JsonDocument light;
     light["name"] = nullptr;   // null = use the device name ("Bedlight") for the light itself
@@ -939,7 +1297,12 @@ void publishDiscovery() {
     light["state_topic"]        = topicState;
     light["availability_topic"] = topicAvailability;
     light["brightness"]         = true;
-    light["supported_color_modes"].to<JsonArray>().add("rgb");
+    JsonArray colourModes = light["supported_color_modes"].to<JsonArray>();
+    colourModes.add("color_temp");          // whites, picked by temperature
+    colourModes.add("rgb");                 // any colour
+    light["color_temp_kelvin"]  = true;     // send colour temperatures in kelvin, not mireds
+    light["min_kelvin"]         = MIN_KELVIN;
+    light["max_kelvin"]         = MAX_KELVIN;
     light["effect"]             = true;
     JsonArray effects = light["effect_list"].to<JsonArray>();
     for (uint8_t mode = MODE_MIN; mode <= MODE_MAX; mode++) effects.add(MODE_NAMES[mode]);
@@ -979,7 +1342,45 @@ void publishDiscovery() {
     ok &= publishJson(base + "sensor" + node + "rssi/config", sensor);
   }
 
-  // 4. The lamp's IP address, also a diagnostic.
+  // 4. Effect speed, as a slider from 1 to 10.
+  {
+    JsonDocument number;
+    number["name"]               = "Effect speed";
+    number["unique_id"]          = id + "_speed";
+    number["icon"]               = "mdi:speedometer";
+    number["command_topic"]      = topicSpeedSet;
+    number["state_topic"]        = topicState;
+    number["value_template"]     = "{{ value_json.speed }}";
+    number["min"]                = SPEED_MIN;
+    number["max"]                = SPEED_MAX;
+    number["step"]               = 1;
+    number["mode"]               = "slider";
+    number["availability_topic"] = topicAvailability;
+    addDeviceInfo(number);
+    ok &= publishJson(base + "number" + node + "speed/config", number);
+  }
+
+  // 5. Sleep timer, as a slider in minutes (0 = off). While a timer runs,
+  //    the state reports the minutes left, so the slider counts down.
+  {
+    JsonDocument number;
+    number["name"]                = "Sleep timer";
+    number["unique_id"]           = id + "_sleep";
+    number["icon"]                = "mdi:timer-sand";
+    number["command_topic"]       = topicSleepSet;
+    number["state_topic"]         = topicState;
+    number["value_template"]      = "{{ value_json.sleep }}";
+    number["min"]                 = 0;
+    number["max"]                 = SLEEP_MAX_MINUTES;
+    number["step"]                = 5;
+    number["unit_of_measurement"] = "min";
+    number["mode"]                = "slider";
+    number["availability_topic"]  = topicAvailability;
+    addDeviceInfo(number);
+    ok &= publishJson(base + "number" + node + "sleep/config", number);
+  }
+
+  // 6. The lamp's IP address, also a diagnostic.
   {
     JsonDocument sensor;
     sensor["name"]               = "IP address";
@@ -999,20 +1400,28 @@ void publishDiscovery() {
 
 // Reports what the lamp is doing, for example:
 //   {"state":"ON","brightness":128,"color_mode":"rgb","color":{"r":255,"g":180,"b":107},
-//    "effect":"Candle","palette":"Ocean","rssi":-63,"ip":"192.168.30.30"}
-// The light reads state/brightness/color/effect; the palette selector and
-// the two sensors pick out their own field with their value_template.
+//    "effect":"Candle","palette":"Ocean","speed":5,"sleep":0,"rssi":-63,"ip":"192.168.30.30"}
+// or, for a white picked by temperature, "color_mode":"color_temp","color_temp":2700.
+// The light reads state/brightness/colour/effect; the palette selector, the
+// sliders and the sensors pick out their own field with their value_template.
 void publishState() {
   JsonDocument state;
   state["state"]      = lamp.on ? "ON" : "OFF";
   state["brightness"] = lamp.brightness;
-  state["color_mode"] = "rgb";
-  JsonObject colour = state["color"].to<JsonObject>();
-  colour["r"] = lamp.colour.r;
-  colour["g"] = lamp.colour.g;
-  colour["b"] = lamp.colour.b;
+  if (lamp.kelvin != 0) {
+    state["color_mode"] = "color_temp";
+    state["color_temp"] = lamp.kelvin;
+  } else {
+    state["color_mode"] = "rgb";
+    JsonObject colour = state["color"].to<JsonObject>();
+    colour["r"] = lamp.colour.r;
+    colour["g"] = lamp.colour.g;
+    colour["b"] = lamp.colour.b;
+  }
   state["effect"]  = MODE_NAMES[lamp.mode];
   state["palette"] = PALETTES[lamp.palette].name;
+  state["speed"]   = lamp.speed;
+  state["sleep"]   = sleepMinutesLeft();
   state["rssi"]    = WiFi.RSSI();
   state["ip"]      = WiFi.localIP().toString();
   if (publishJson(topicState, state)) {
@@ -1102,11 +1511,13 @@ void onAlexaCommand(EspalexaDevice *device) {
     return;
   }
 
-  // A colour request: hs = hue and saturation ("blue"), ct = colour
-  // temperature ("warm white"), xy = a colour chart position. Espalexa turns
-  // all three into ordinary red, green and blue values for us.
-  if (changed == EspalexaDeviceProperty::hs || changed == EspalexaDeviceProperty::ct ||
-      changed == EspalexaDeviceProperty::xy) {
+  // A colour request: hs = hue and saturation ("blue"), xy = a colour chart
+  // position; Espalexa turns both into ordinary red, green and blue for us.
+  // ct = colour temperature ("warm white"), which Alexa sends in "mireds":
+  // 1,000,000 divided by the temperature in kelvin, so we turn it back.
+  if (changed == EspalexaDeviceProperty::ct && device->getCt() > 0) {
+    setColourTemperature(1000000UL / device->getCt());   // also selects Solid colour
+  } else if (changed == EspalexaDeviceProperty::hs || changed == EspalexaDeviceProperty::xy) {
     setColour(CRGB(device->getR(), device->getG(), device->getB()));   // also selects Solid colour
   }
 
@@ -1147,8 +1558,11 @@ void syncAlexa() {
 //   /power?on=1|0
 //   /colour?hex=RRGGBB        (a colour name also works)
 //   /brightness?value=1-255
-//   /mode?id=1-7
+//   /mode?id=1-14
 //   /palette?id=0-5
+//   /temperature?kelvin=2000-6500   (a white by colour temperature)
+//   /speed?value=1-10               (effect speed)
+//   /sleep?minutes=0-120            (sleep timer; 0 cancels it)
 //
 // web.on("/address", function) registers a handler: "when a browser asks for
 // this address, run this function". The functions here are lambdas (see
@@ -1182,7 +1596,7 @@ void startWebServer() {
 
   web.on("/mode", []() {
     long id = web.arg("id").toInt();
-    if (id < MODE_MIN || id > MODE_MAX) return replyBadRequest("id must be 1-7");
+    if (id < MODE_MIN || id > MODE_MAX) return replyBadRequest("id must be a mode number (1-14)");
     setMode(id);
     replyWithState();
   });
@@ -1192,6 +1606,28 @@ void startWebServer() {
     long id = web.arg("id").toInt();
     if (id < 0 || id >= PALETTE_COUNT) return replyBadRequest("unknown palette id");
     setPalette(id);
+    replyWithState();
+  });
+
+  web.on("/temperature", []() {
+    long kelvin = web.arg("kelvin").toInt();
+    if (kelvin < MIN_KELVIN || kelvin > MAX_KELVIN) return replyBadRequest("kelvin must be 2000-6500");
+    setColourTemperature(kelvin);
+    replyWithState();
+  });
+
+  web.on("/speed", []() {
+    long speed = web.arg("value").toInt();
+    if (speed < SPEED_MIN || speed > SPEED_MAX) return replyBadRequest("value must be 1-10");
+    setSpeed(speed);
+    replyWithState();
+  });
+
+  web.on("/sleep", []() {
+    if (!web.hasArg("minutes")) return replyBadRequest("missing minutes");
+    long minutes = web.arg("minutes").toInt();
+    if (minutes < 0 || minutes > SLEEP_MAX_MINUTES) return replyBadRequest("minutes must be 0-120");
+    setSleepTimer(minutes);
     replyWithState();
   });
 
@@ -1225,12 +1661,15 @@ String stateAsJson() {
   snprintf(colour, sizeof(colour), "#%02x%02x%02x", lamp.colour.r, lamp.colour.g, lamp.colour.b);
 
   String json;
-  json.reserve(400);
+  json.reserve(450);
   json += "{\"on\":";
   json += lamp.on ? "true" : "false";
   json += ",\"mode\":";       json += lamp.mode;
   json += ",\"palette\":";    json += lamp.palette;
   json += ",\"brightness\":"; json += lamp.brightness;
+  json += ",\"speed\":";      json += lamp.speed;
+  json += ",\"kelvin\":";     json += lamp.kelvin;
+  json += ",\"sleep\":";      json += sleepMinutesLeft();
   json += ",\"colour\":\"";   json += colour;
   json += "\",\"palettes\":[";
   for (uint8_t i = 0; i < PALETTE_COUNT; i++) {
