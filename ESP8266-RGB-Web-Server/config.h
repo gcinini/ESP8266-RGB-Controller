@@ -72,15 +72,15 @@
 //                      each other's status report.)
 
 #if LAMP_ID == 1
-  // --- Lamp 1: the glass-jar lightbox (35 LEDs) ---
+  // --- Lamp 1: the bed headboard light bar (was a glass-jar lightbox) (34 LEDs) ---
   #define DEVICE_NAME          "ESP-lightbox1"
-  #define LED_COUNT            35
+  #define LED_COUNT            34
   #define LED_PIN              D4
   #define LED_TYPE             WS2812B
   #define LED_ORDER            GRB
   #define CANDLE_LEDS          14
   #define CANDLE_AT_LED_ZERO   true
-  #define ALEXA_NAME           "Lightbox"
+  #define ALEXA_NAME           "Bedlight"
   #define FEED_GROUP           "espweb"
 
 #elif LAMP_ID == 2
